@@ -132,14 +132,14 @@ def main():
     contrast_imgs = [data[frame][0] for frame in params['contrast_frames']]
 
     # To see the segmentation overlayed on the actual frame:
-    # sitk.Show(sitk.LabelOverlay(contrast_img, segm, opacity=0.01), title='Overlay')
+    # sitk.Show(sitk.LabelOverlay(noncontrast_imgs[0], segm, opacity=0.01), title='Overlay')
 
     #
     # From the  Bouzerar et al paper (Neuroradiology 2013, DOI 10.1007/s00234-013-1290-2):
     # "For each pixel, the pre-bolus baseline S0 was estimated by
     #  averaging 10 to 12 points before tB. For an individual voxel,
     #  significant enhancement occurred when the mean signal intensity
-    #  over the final ten time points was greater than 1 standard
+    #  over the final ten time points was greater (<-what??) than 1 standard
     #  deviation over the voxel average baseline S0. After comparison
     #  between the post-bolus signal and the pre-bolus baseline S0,
     #  pixels within the mask that did not demonstrate significant signal
@@ -148,21 +148,26 @@ def main():
     #
     noncontrast_avg_array = np.round(np.add(*[sitk.GetArrayFromImage(img) for img in noncontrast_imgs])/len(noncontrast_imgs)).astype(int)
     contrast_avg_array = np.round(np.add(*[sitk.GetArrayFromImage(img) for img in contrast_imgs])/len(contrast_imgs)).astype(int)
-    non_contrast_std = np.round(np.std(noncontrast_avg_array)).astype(int)
 
     # To edit the segmentation itself, we save the indexes of each one of its voxels:
     segm_arr = sitk.GetArrayFromImage(segm)
     mask_indexes = list(zip(*np.where(segm_arr == segmentation_label)))
 
-    remove_condition = contrast_avg_array[segm_arr == 1] > np.std(noncontrast_avg_array[segm_arr == 1])
+    # Remove voxels whose noncontrast minus contrast average intensity is lower than one standard deviation of the
+    # average noncontrast intensity.
+    remove_condition = (noncontrast_avg_array[segm_arr == 1] - contrast_avg_array[segm_arr == 1]) < np.std(noncontrast_avg_array[segm_arr == 1])
 
+    # Setting the voxel to 0 (the default label for background) removes it from the segmentation
     for idx, cond in zip(mask_indexes, remove_condition):
         if cond:
-            # Setting the voxel to 0 (the default label for background) removes it from the segmentation
             segm_arr[idx] = background_label
 
+    # The final segmentation contains voxels that take up contrast and don't contain calcifications
     final_segm = sitk.GetImageFromArray(segm_arr)
     final_segm.CopyInformation(segm)
+
+    # Look at the final segmentation
+    sitk.Show(sitk.LabelOverlay(noncontrast_imgs[0], final_segm, opacity=0.01))
     sitk.WriteImage(final_segm, os.path.join(data_root, segmentations_dir, uid, 'Plexus_final.nrrd'))
 
 
