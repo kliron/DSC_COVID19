@@ -6,6 +6,7 @@ import json
 import numpy as np
 import matplotlib.pyplot as plt
 import argparse
+from typing import Any
 
 # This is to make relative imports work both when this file is run "on the fly" in an IDE
 # and when it is run as a script (as __main__). For the first case to work, the console
@@ -19,8 +20,14 @@ else:
 
 os.environ['SITK_SHOW_COMMAND'] = 'H:/Slicer 4.11.20210226/Slicer.exe' if os.name == 'nt' else \
     '/Applications/Slicer.app/Contents/MacOS/Slicer'
+    #'/Applications/Fiji.app/Contents/MacOS/ImageJ-macosx'
 default_dicom_tags_json_path = 'H:/Dokument/Projects/dsc_covid19/dicom_tags.json' if os.name == 'nt' else \
     './dicom_tags.json'
+
+DATA_ROOT = 'H:/Dokument' if os.name == 'nt' else '/Users/kliron'
+DICOM_ROOT = 'Data/dsc_covid19/Examinations'
+SEGMENTATIONS_ROOT = 'Data/dsc_covid19/Segmentations'
+SEGMENTATION_FILENAME = 'Plexus.nrrd'
 ACQUISITION_NUMBER_DICOM_TAG = '0020|0012'
 
 
@@ -117,22 +124,21 @@ def show_overlay(bg_img: sitk.Image, overlayed_img: sitk.Image, opacity: float =
 
 
 def edit_segmentation(uid: str,
-                      params: dict[str:str],
-                      data_root: str = 'H:/Dokument' if os.name == 'nt' else '/Users/kliron',
-                      dicom_root: str = 'Data/dsc_covid19/Examinations',
-                      segmentations_dir: str = 'Data/dsc_covid19/Segmentations',
-                      segmentation_file: str = 'Plexus.nrrd',
+                      params: dict[str, Any],
                       foreground_label: int = 1,
                       background_label: int = 0,
                       show: bool = False) -> None:
     """
-    Removes susceptibility artifacts and non-enhancing pixels from a segmentation volume. Writes the new segmentation
-    at the path specified as `os.path.join(data_root, segmentations_dir, uid, f'final_{segmentation_file}').
+    :param uid: Unique identification number for an exam.
+    :param params: Path and slice number parameters defined in `paths` module.
+    :param foreground_label: Foreground integer value of the segmentation LabelMap (Default 1).
+    :param background_label: Background integer value of the segmentation LabelMap (Default 0).
+    :param show: If true, show an overlay of the final segmentation and the first slice of the first frame of the series.
     :return: None
     """
-    dicom_path = os.path.join(data_root, dicom_root, uid, 'DICOM', params['dicom_dir'])
+    dicom_path = os.path.join(DATA_ROOT, DICOM_ROOT, uid, 'DICOM', params['dicom_dir'])
     data = read_4d_series(dicom_path)
-    segm = sitk.ReadImage(os.path.join(data_root, segmentations_dir, uid, segmentation_file))
+    segm = sitk.ReadImage(os.path.join(DATA_ROOT, SEGMENTATIONS_ROOT, uid, SEGMENTATION_FILENAME))
 
     # Get the average voxel values for the non-contrast series
     noncontrast_imgs = [data[frame][0] for frame in params['noncontrast_frames']]
@@ -162,29 +168,67 @@ def edit_segmentation(uid: str,
     final_segm = sitk.GetImageFromArray(segm_arr)
     final_segm.CopyInformation(segm)
 
-    # Erosion currently does not work, sets all pixels to 0.
-    # To reduce partial volume effects, erode the segmentation borders
+    # Erosion does not work for these images as they are just 1-2 voxels wide and the erosion converts it all to bg.
+    # Leaving it here for reference.
     # f = sitk.BinaryErodeImageFilter()
     # f.SetKernelType(sitk.sitkBall)
     # f.SetKernelRadius(1)
     # f.SetBackgroundValue(0)
     # f.SetForegroundValue(1)
-    # final_segm: sitk.Image = f.Execute(final_segm)
-
-    # len(np.where(sitk.GetArrayFromImage(final_segm) == 1)[0])
+    # eroded_segm: sitk.Image = f.Execute(final_segm)
 
     if show:
         show_overlay(noncontrast_imgs[0], final_segm)
 
-    sitk.WriteImage(final_segm, os.path.join(data_root, segmentations_dir, uid, f'final_{segmentation_file}'))
+    sitk.WriteImage(final_segm, os.path.join(DATA_ROOT, SEGMENTATIONS_ROOT, uid, f'final_{SEGMENTATION_FILENAME}'))
+
+
+def run_perfusion(uid: str, params: dict[str, Any], show: bool = False) -> None:
+    """
+    Uses DSCMRIAnalysis slicer CLI module to extract perfusion maps for all examinations using the final segmentations
+    created by the step above as ROI.
+    :param uid: Unique exam ID string
+    :param params: Path and slice number parameters defined in `paths` module.
+    :param show: If true, shows the resulting perfusion maps.
+    :return: None
+    """
 
 
 def main():
-    parser = argparse.ArgumentParser(description='DSC perfusion analysis.')
-    
-    items = paths.items()
-    for uid, params in items:
-        edit_segmentation(uid, params)
+    parser = argparse.ArgumentParser(description='DSC perfusion analysis.',
+                                     usage=f'{sys.argv[0]} [--uid UID] [--segmentation | --perfusion]\n'
+                                           f'If neither --segmentation nor --perfusion argument is provided, '
+                                           f'first segmentation and then perfusion pipeline will execute')
+    parser.add_argument('-u', '--uid', help='Specify a single UID to process', nargs=1)
+    parser.add_argument('-s', '--segmentation', action='store_true', help='Process segmentations')
+    parser.add_argument('-p', '--perfusion', action='store_true', help='Run perfusion analysis')
+    args = parser.parse_args()
+
+    exams = paths.items()
+    if len(sys.argv) < 2:
+        parser.print_usage()
+        sys.exit(1)
+
+    if args.uid:
+        uid, params = exams[args.uid[0]]
+        if args.segmentation:
+            edit_segmentation(uid, params, show=True)
+        elif args.perfusion:
+            run_perfusion(uid, params)
+        else:
+            edit_segmentation(uid, params, show=True)
+            run_perfusion(uid, params)
+    else:
+        if args.segmentation:
+            for uid, params in exams:
+                edit_segmentation(uid, params, show=True)
+        elif args.perfusion:
+            for uid, params in exams:
+                run_perfusion(uid, params, show=True)
+        else:
+            for uid, params in exams:
+                edit_segmentation(uid, params, show=True)
+                run_perfusion(uid, params, show=True)
 
 
 if __name__ == '__main__':
