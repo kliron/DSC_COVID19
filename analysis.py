@@ -20,7 +20,6 @@ else:
 
 os.environ['SITK_SHOW_COMMAND'] = 'H:/Slicer 4.11.20210226/Slicer.exe' if os.name == 'nt' else \
     '/Applications/Slicer.app/Contents/MacOS/Slicer'
-    #'/Applications/Fiji.app/Contents/MacOS/ImageJ-macosx'
 default_dicom_tags_json_path = 'H:/Dokument/Projects/dsc_covid19/dicom_tags.json' if os.name == 'nt' else \
     './dicom_tags.json'
 
@@ -28,7 +27,8 @@ DATA_ROOT = 'H:/Dokument' if os.name == 'nt' else '/Users/kliron'
 DICOM_ROOT = 'Data/dsc_covid19/Examinations'
 SEGMENTATIONS_ROOT = 'Data/dsc_covid19/Segmentations'
 SEGMENTATION_FILENAME = 'Plexus.nrrd'
-ACQUISITION_NUMBER_DICOM_TAG = '0020|0012'
+DICOM_TEMPORAL_POSITION_IDENTIFIER = '0020|0100'
+DICOM_ACQUISITION_NUMBER = '0020|0012'
 
 
 def get_dicom_tags(json_path: str = default_dicom_tags_json_path, invert=False) -> dict:
@@ -43,8 +43,8 @@ def get_dicom_tags(json_path: str = default_dicom_tags_json_path, invert=False) 
 
 def get_tag_by_name(name: str) -> str:
     """
-    :param name: Tag human readable description
-    :return: DICOM tag
+    :param name: Human readable description of a DICOM tag
+    :return: (Machine readable) DICOM tag
     """
     for key, val in get_dicom_tags().items():
         if val == name:
@@ -75,30 +75,35 @@ def read_3d_series(dsc_path: str) -> (sitk.Image, dict):
     return series, metadata
 
 
-def read_4d_series(dsc_path: str) -> [(sitk.Image, dict)]:
+def read_4d_series(dcm_path: str) -> [(sitk.Image, dict)]:
     """
     There is no built-in way to read 4D series like a DSC perfusion time series in ITK. We do what is described
     here: https://github.com/SimpleITK/SimpleITK/issues/879 to get an ordered list of 3D volumes instead, each being one
      frame in the time series.
      Returns a list of tuples, each containing the 3D Volume of one frame and a dictionary of DICOM tags read from its
      first slice.
-    :param dsc_path: Path to the directory containing all DICOM files
+    :param dcm_path: Path to the directory containing all DICOM files
     :return: [(sitk.Image, dict)]
     """
     reader = sitk.ImageSeriesReader()
-    all_dicom_names = reader.GetGDCMSeriesFileNames(dsc_path)
+    all_dicom_names = reader.GetGDCMSeriesFileNames(dcm_path)
     file_reader = sitk.ImageFileReader()
     file_lists = []
+    warnings = set([])
     for dcm_name in all_dicom_names:
         file_reader.SetFileName(dcm_name)
         file_reader.ReadImageInformation()
         _ = file_reader.Execute()
-        # Acquisition Number starts at 1 and strictly increases by 1
-        acquisition_number = int(file_reader.GetMetaData(ACQUISITION_NUMBER_DICOM_TAG))
-        if len(file_lists) < acquisition_number:
+        # Prefer temporal position identifier if it is defined, fall back to acquisition number if it is not.
+        try:
+            position_identifier = int(file_reader.GetMetaData(DICOM_TEMPORAL_POSITION_IDENTIFIER))
+        except RuntimeError as e:
+            warnings.add(f'Warning: Temporal position identifier key is not defined, falling back to acquisition number')
+            position_identifier = int(file_reader.GetMetaData(DICOM_ACQUISITION_NUMBER))
+        if len(file_lists) < position_identifier:
             file_lists.append([dcm_name])
         else:
-            file_lists[acquisition_number-1].append(dcm_name)
+            file_lists[position_identifier-1].append(dcm_name)
 
     series_list = []
     for dcm_names_list in file_lists:
@@ -108,6 +113,10 @@ def read_4d_series(dsc_path: str) -> [(sitk.Image, dict)]:
         series = reader.Execute()
         metadata = {k: reader.GetMetaData(0, k) for k in reader.GetMetaDataKeys(slice=0)}
         series_list.append((series, metadata))
+
+    if len(warnings):
+        for w in warnings:
+            print(w)
 
     return series_list
 
@@ -136,8 +145,9 @@ def edit_segmentation(uid: str,
     :param show: If true, show an overlay of the final segmentation and the first slice of the first frame of the series.
     :return: None
     """
-    dicom_path = os.path.join(DATA_ROOT, DICOM_ROOT, uid, 'DICOM', params['dicom_dir'])
-    data = read_4d_series(dicom_path)
+    print(f'Edit segmentation for {uid}')
+    dcm_path = os.path.join(DATA_ROOT, DICOM_ROOT, uid, 'DICOM', params['dicom_dir'])
+    data = read_4d_series(dcm_path)
     segm = sitk.ReadImage(os.path.join(DATA_ROOT, SEGMENTATIONS_ROOT, uid, SEGMENTATION_FILENAME))
 
     # Get the average voxel values for the non-contrast series
@@ -210,7 +220,8 @@ def main():
         sys.exit(1)
 
     if args.uid:
-        uid, params = exams[args.uid[0]]
+        uid = args.uid[0]
+        params = paths[uid]
         if args.segmentation:
             edit_segmentation(uid, params, show=True)
         elif args.perfusion:
