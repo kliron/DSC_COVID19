@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 import SimpleITK as sitk
 import os
@@ -102,7 +103,7 @@ def read_4d_series(dcm_path: str) -> [(sitk.Image, dict)]:
         try:
             position_identifier = int(file_reader.GetMetaData(DICOM_TEMPORAL_POSITION_IDENTIFIER))
         except RuntimeError as e:
-            warnings.add(f'Warning: Temporal position identifier key is not defined, falling back to acquisition number')
+            warnings.add(f'Warning: `Temporal position identifier` DICOM tag is not defined, falling back to acquisition number')
             position_identifier = int(file_reader.GetMetaData(DICOM_ACQUISITION_NUMBER))
         if len(file_lists) < position_identifier:
             file_lists.append([dcm_name])
@@ -241,15 +242,13 @@ def run_perfusion(uid: str) -> None:
 
 def main():
     parser = argparse.ArgumentParser(description='DSC perfusion analysis.',
-                                     usage=f'{sys.argv[0]} [--uid UID] [--segmentation | --perfusion]\n'
-                                           f'If neither --segmentation nor --perfusion argument is provided, '
-                                           f'first segmentation and then perfusion pipeline will execute')
+                                     usage=f'{sys.argv[0]} [--uid UID] --segmentation | --perfusion\n')
     parser.add_argument('-u', '--uid', help='Specify a single UID to process', nargs=1)
     parser.add_argument('-s', '--segmentation', action='store_true', help='Process segmentations')
     parser.add_argument('-p', '--perfusion', action='store_true', help='Run perfusion analysis')
     args = parser.parse_args()
-
     exams = paths.items()
+
     if len(sys.argv) < 2:
         parser.print_usage()
         sys.exit(1)
@@ -260,21 +259,18 @@ def main():
         if args.segmentation:
             edit_segmentation(uid, params, show=True)
         elif args.perfusion:
-            run_perfusion(uid, params)
+            run_perfusion(uid)
         else:
             edit_segmentation(uid, params)
-            run_perfusion(uid, params)
+            run_perfusion(uid)
     else:
         if args.segmentation:
             for uid, params in exams:
                 edit_segmentation(uid, params)
-        elif args.perfusion:
+
+        if args.perfusion:
             for uid, params in exams:
-                run_perfusion(uid, params)
-        else:
-            for uid, params in exams:
-                edit_segmentation(uid, params)
-                run_perfusion(uid, params)
+                run_perfusion(uid)
 
 
 if __name__ == '__main__':
