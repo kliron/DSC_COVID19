@@ -7,6 +7,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import argparse
 from typing import Any
+import subprocess
 
 # This is to make relative imports work both when this file is run "on the fly" in an IDE
 # and when it is run as a script (as __main__). For the first case to work, the console
@@ -15,7 +16,7 @@ parent_module = sys.modules['.'.join(__name__.split('.')[:-1]) or '__main__']
 if __name__ == '__main__' or parent_module.__name__ == '__main__':
     from paths import paths
 else:
-    from . import paths
+    from .paths import paths
 
 
 os.environ['SITK_SHOW_COMMAND'] = 'H:/Slicer 4.11.20210226/Slicer.exe' if os.name == 'nt' else \
@@ -25,10 +26,13 @@ default_dicom_tags_json_path = 'H:/Dokument/Projects/dsc_covid19/dicom_tags.json
 
 DATA_ROOT = 'H:/Dokument' if os.name == 'nt' else '/Users/kliron'
 DICOM_ROOT = 'Data/dsc_covid19/Examinations'
-SEGMENTATIONS_ROOT = 'Data/dsc_covid19/Segmentations'
+DERIVED_ROOT = 'Data/dsc_covid19/Derived'
 SEGMENTATION_FILENAME = 'Plexus.nrrd'
 DICOM_TEMPORAL_POSITION_IDENTIFIER = '0020|0100'
 DICOM_ACQUISITION_NUMBER = '0020|0012'
+DSC_EXECUTABLE_PATH = '/Applications/Slicer.app/Contents/Extensions-30329/DSCMRIAnalysis/lib/Slicer-4.13/cli-modules/DSCMRIAnalysis'
+# Each 4D perfusion DICOM series is written to a single nrrd file to be readable from DSC Slicer module
+PERFUSION_4D_FILE = 'Perfusion.nrrd'
 
 
 def get_dicom_tags(json_path: str = default_dicom_tags_json_path, invert=False) -> dict:
@@ -132,6 +136,17 @@ def show_overlay(bg_img: sitk.Image, overlayed_img: sitk.Image, opacity: float =
     sitk.Show(sitk.LabelOverlay(bg_img, overlayed_img, opacity=opacity), title='Overlay')
 
 
+def convert_to_vector_4d_image() -> sitk.Image:
+    """
+
+    Takes a list of 3D volumes and converts it to a single image with vector voxels. For a list of length t, a voxel at
+    position xyz in the final image will be a vector of length t with each value being the value of voxel xyz of the
+    3D volume at index t in the list. In other words, the image with have dimensions txyz.
+
+    :return: A vector voxel image
+    """
+
+
 def edit_segmentation(uid: str,
                       params: dict[str, Any],
                       foreground_label: int = 1,
@@ -145,10 +160,10 @@ def edit_segmentation(uid: str,
     :param show: If true, show an overlay of the final segmentation and the first slice of the first frame of the series.
     :return: None
     """
-    print(f'Edit segmentation for {uid}')
+    print(f'Editing segmentation for {uid}')
     dcm_path = os.path.join(DATA_ROOT, DICOM_ROOT, uid, 'DICOM', params['dicom_dir'])
     data = read_4d_series(dcm_path)
-    segm = sitk.ReadImage(os.path.join(DATA_ROOT, SEGMENTATIONS_ROOT, uid, SEGMENTATION_FILENAME))
+    segm = sitk.ReadImage(os.path.join(DATA_ROOT, DERIVED_ROOT, uid, SEGMENTATION_FILENAME))
 
     # Get the average voxel values for the non-contrast series
     noncontrast_imgs = [data[frame][0] for frame in params['noncontrast_frames']]
@@ -160,7 +175,6 @@ def edit_segmentation(uid: str,
     segm_arr = sitk.GetArrayFromImage(segm)
     mask_indexes = list(zip(*np.where(segm_arr == foreground_label)))
 
-    #
     # Segmentations are saved as labelmaps where each voxel belonging to the segmentation has the value 1 (default)
     # and the rest the value 0. Thus, by using orig_img_arr[segm == 1] we can index into the original image and get the
     # voxels corresponding to the volume of the segmentation.
@@ -177,31 +191,52 @@ def edit_segmentation(uid: str,
     # The final segmentation contains voxels that take up contrast and don't contain calcifications
     final_segm = sitk.GetImageFromArray(segm_arr)
     final_segm.CopyInformation(segm)
-
-    # Erosion does not work for these images as they are just 1-2 voxels wide and the erosion converts it all to bg.
-    # Leaving it here for reference.
-    # f = sitk.BinaryErodeImageFilter()
-    # f.SetKernelType(sitk.sitkBall)
-    # f.SetKernelRadius(1)
-    # f.SetBackgroundValue(0)
-    # f.SetForegroundValue(1)
-    # eroded_segm: sitk.Image = f.Execute(final_segm)
-
-    if show:
-        show_overlay(noncontrast_imgs[0], final_segm)
-
-    sitk.WriteImage(final_segm, os.path.join(DATA_ROOT, SEGMENTATIONS_ROOT, uid, f'final_{SEGMENTATION_FILENAME}'))
+    show_overlay(noncontrast_imgs[0], final_segm) if show else ()
+    sitk.WriteImage(final_segm, os.path.join(DATA_ROOT, DERIVED_ROOT, uid, f'final_{SEGMENTATION_FILENAME}'))
 
 
-def run_perfusion(uid: str, params: dict[str, Any], show: bool = False) -> None:
+def run_perfusion(uid: str) -> None:
     """
-    Uses DSCMRIAnalysis slicer CLI module to extract perfusion maps for all examinations using the final segmentations
-    created by the step above as ROI.
+    Uses DSCMRIAnalysis Slicer CLI module (https://www.slicer.org/w/index.php/Documentation/Nightly/Modules/DSC_MRI_Analysis)
+    to extract perfusion maps for all examinations using the final segmentations created by the step above as ROI.
+
+    This is an example of the command that will run in a subprocess:
+    /Applications/Slicer.app/Contents/Extensions-30329/DSCMRIAnalysis/lib/Slicer-4.13/cli-modules/DSCMRIAnalysis \
+            --roiMask /Users/kliron/Data/dsc_covid19/Segmentations/SEKBF00012197064/final_Plexus.nrrd \
+            --aifMask /Users/kliron/Data/dsc_covid19/Segmentations/SEKBF00012197064/Artery.nrrd  \
+            --outputK1 path_to_K1.nrrd \
+            --outputK2 path_to_K2.nrrd \
+            --outputMTT path_to_MTT.nrrd \
+            --outputCBF path_to_CBF.nrrd \
+            /Users/kliron/Downloads/multivolume.nrrd
+
     :param uid: Unique exam ID string
-    :param params: Path and slice number parameters defined in `paths` module.
-    :param show: If true, shows the resulting perfusion maps.
     :return: None
     """
+    print(f'Computing perfusion maps for {uid}')
+    root_path = os.path.join(DATA_ROOT, DERIVED_ROOT, uid)
+    args = ['--roiMask', os.path.join(root_path, 'final_Plexus.nrrd'),
+            '--aifMask', os.path.join(root_path, 'Artery.nrrd'),
+            '--outputK1', os.path.join(root_path, 'K1.nrrd'),
+            '--outputK2', os.path.join(root_path, 'K2.nrrd'),
+            '--outputMTT', os.path.join(root_path, 'MTT.nrrd'),
+            '--outputCBF', os.path.join(root_path, 'CBF.nrrd'),
+            os.path.join(root_path, PERFUSION_4D_FILE)]
+
+    print('Executing DSC CLI module...')
+    print(DSC_EXECUTABLE_PATH + ' \\ \n' +
+          ' \\ \n    '.join([f'{args[i]} {args[j]}' for i, j in zip(range(0, len(args), 2), range(1, len(args), 2))]) +
+          ' \\ \n    ' + args[len(args)-1])
+
+    process = subprocess.Popen([DSC_EXECUTABLE_PATH, *args],
+                               stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE,
+                               universal_newlines=True)
+    # `communicate()` call will wait for process to complete.
+    stdout, stderr = process.communicate()
+    print(stdout)
+    print(stderr)
+    print(f'\nProcess returned exit code {process.returncode}')
 
 
 def main():
@@ -227,19 +262,19 @@ def main():
         elif args.perfusion:
             run_perfusion(uid, params)
         else:
-            edit_segmentation(uid, params, show=True)
+            edit_segmentation(uid, params)
             run_perfusion(uid, params)
     else:
         if args.segmentation:
             for uid, params in exams:
-                edit_segmentation(uid, params, show=True)
+                edit_segmentation(uid, params)
         elif args.perfusion:
             for uid, params in exams:
-                run_perfusion(uid, params, show=True)
+                run_perfusion(uid, params)
         else:
             for uid, params in exams:
-                edit_segmentation(uid, params, show=True)
-                run_perfusion(uid, params, show=True)
+                edit_segmentation(uid, params)
+                run_perfusion(uid, params)
 
 
 if __name__ == '__main__':
