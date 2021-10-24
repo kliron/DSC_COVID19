@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-import SimpleITK as sitk
-import os
+
 import sys
-import json
-import numpy as np
-import matplotlib.pyplot as plt
 import argparse
-from typing import Any
-import subprocess
+from typing import Dict, Any
+
+import SimpleITK
+import numpy as np
 
 # This is to make relative imports work both when this file is run "on the fly" in an IDE
 # and when it is run as a script (as __main__). For the first case to work, the console
@@ -16,150 +14,42 @@ import subprocess
 parent_module = sys.modules['.'.join(__name__.split('.')[:-1]) or '__main__']
 if __name__ == '__main__' or parent_module.__name__ == '__main__':
     from paths import paths
+    from util import *
 else:
     from .paths import paths
+    from .util import *
 
 
-os.environ['SITK_SHOW_COMMAND'] = 'H:/Slicer 4.11.20210226/Slicer.exe' if os.name == 'nt' else \
-    '/Applications/Slicer.app/Contents/MacOS/Slicer'
-default_dicom_tags_json_path = 'H:/Dokument/Projects/dsc_covid19/dicom_tags.json' if os.name == 'nt' else \
-    './dicom_tags.json'
+os.environ['SITK_SHOW_COMMAND'] = 'H:/Slicer 4.11.20210226/Slicer.exe' if os.name == 'nt' else '/Applications/Slicer.app/Contents/MacOS/Slicer'
+os.environ['FSLOUTPUTTYPE'] = 'NIFTI'  # this is to make bet2 tool not bitch when we execute it with subprocess
 
 DATA_ROOT = 'H:/Dokument' if os.name == 'nt' else '/Users/kliron'
 DICOM_ROOT = 'Data/dsc_covid19/Examinations'
 DERIVED_ROOT = 'Data/dsc_covid19/Derived'
 SEGMENTATION_FILENAME = 'Plexus.nrrd'
-DICOM_TEMPORAL_POSITION_IDENTIFIER = '0020|0100'
-DICOM_ACQUISITION_NUMBER = '0020|0012'
-DSC_EXECUTABLE_PATH = '/Applications/Slicer.app/Contents/Extensions-30329/DSCMRIAnalysis/lib/Slicer-4.13/cli-modules/DSCMRIAnalysis'
+# BET (brain extraction tool) does not support 4D images. We need to convert each 4D series to a list of 3D images,
+# save it to a temporary nifti file, call BET to process it, and convert the output back to nrrd which is the format the
+# DSC Slicer module expects
+PERFUSION_3D_TMP_NIFTI_FILE = '_Perfusion3D.nii'
+PERFUSION_SKULL_STRIPPED_3D_FILE = '_stripped_Perfusion3d.nii'
+BET_EXECUTABLE = '/usr/local/fsl/bin/bet2'
 # Each 4D perfusion DICOM series is written to a single nrrd file to be readable from DSC Slicer module
-PERFUSION_4D_FILE = 'Perfusion.nrrd'
-
-
-def get_dicom_tags(json_path: str = default_dicom_tags_json_path, invert=False) -> dict:
-    """
-    Reads a dictionary of DICOM tag to human readable tag description.
-    if `invert` is True, the key-value pairs are switched
-    """
-    with open(json_path, 'r') as r:
-        tags = json.loads(r.read())
-        return tags if not invert else {val: key for key, val in tags.items()}
-
-
-def get_tag_by_name(name: str) -> str:
-    """
-    :param name: Human readable description of a DICOM tag
-    :return: (Machine readable) DICOM tag
-    """
-    for key, val in get_dicom_tags().items():
-        if val == name:
-            return key
-
-
-def read_3d_series(dsc_path: str) -> (sitk.Image, dict):
-    """
-    Reads a DICOM series and returns a tuple of the (multislice) image and a dictionary of metadata from the first slice
-    :param dsc_path: Path to directory containing DICOM files
-    :return: SimpleITK.Image
-    """
-    reader = sitk.ImageSeriesReader()
-    dicom_names = reader.GetGDCMSeriesFileNames(dsc_path)
-    reader.SetFileNames(dicom_names)
-    reader.LoadPrivateTagsOn()
-    reader.MetaDataDictionaryArrayUpdateOn()
-    series = reader.Execute()
-    tags = get_dicom_tags()
-    metadata = {}
-    for key in reader.GetMetaDataKeys(slice=0):
-        try:
-            desc = tags[key]
-        except KeyError:
-            print(f'DICOM tag {key} is missing a descriptive name')
-            desc = key
-        metadata[desc] = reader.GetMetaData(0, key)
-    return series, metadata
-
-
-def read_4d_series(dcm_path: str) -> [(sitk.Image, dict)]:
-    """
-    There is no built-in way to read 4D series like a DSC perfusion time series in ITK. We do what is described
-    here: https://github.com/SimpleITK/SimpleITK/issues/879 to get an ordered list of 3D volumes instead, each being one
-     frame in the time series.
-     Returns a list of tuples, each containing the 3D Volume of one frame and a dictionary of DICOM tags read from its
-     first slice.
-    :param dcm_path: Path to the directory containing all DICOM files
-    :return: [(sitk.Image, dict)]
-    """
-    reader = sitk.ImageSeriesReader()
-    all_dicom_names = reader.GetGDCMSeriesFileNames(dcm_path)
-    file_reader = sitk.ImageFileReader()
-    file_lists = []
-    warnings = set([])
-    for dcm_name in all_dicom_names:
-        file_reader.SetFileName(dcm_name)
-        file_reader.ReadImageInformation()
-        _ = file_reader.Execute()
-        # Prefer temporal position identifier if it is defined, fall back to acquisition number if it is not.
-        try:
-            position_identifier = int(file_reader.GetMetaData(DICOM_TEMPORAL_POSITION_IDENTIFIER))
-        except RuntimeError as e:
-            warnings.add(f'Warning: `Temporal position identifier` DICOM tag is not defined, falling back to acquisition number')
-            position_identifier = int(file_reader.GetMetaData(DICOM_ACQUISITION_NUMBER))
-        if len(file_lists) < position_identifier:
-            file_lists.append([dcm_name])
-        else:
-            file_lists[position_identifier-1].append(dcm_name)
-
-    series_list = []
-    for dcm_names_list in file_lists:
-        reader.SetFileNames(dcm_names_list)
-        reader.LoadPrivateTagsOn()
-        reader.MetaDataDictionaryArrayUpdateOn()
-        series = reader.Execute()
-        metadata = {k: reader.GetMetaData(0, k) for k in reader.GetMetaDataKeys(slice=0)}
-        series_list.append((series, metadata))
-
-    if len(warnings):
-        for w in warnings:
-            print(w)
-
-    return series_list
-
-
-def img_histogram(img: sitk.Image, bins=None) -> None:
-    """
-    Get a histogram of voxel intensities for an image
-    """
-    plt.hist(sitk.GetArrayFromImage(img).flatten(), bins=bins)
-
-
-def show_overlay(bg_img: sitk.Image, overlayed_img: sitk.Image, opacity: float = 0.01) -> None:
-    sitk.Show(sitk.LabelOverlay(bg_img, overlayed_img, opacity=opacity), title='Overlay')
-
-
-def convert_to_vector_4d_image() -> sitk.Image:
-    """
-
-    Takes a list of 3D volumes and converts it to a single image with vector voxels. For a list of length t, a voxel at
-    position xyz in the final image will be a vector of length t with each value being the value of voxel xyz of the
-    3D volume at index t in the list. In other words, the image with have dimensions txyz.
-
-    :return: A vector voxel image
-    """
+PERFUSION_4D_FILE = 'Perfusion4D.nrrd'
+DSC_EXECUTABLE = '/Applications/Slicer.app/Contents/Extensions-30329/DSCMRIAnalysis/lib/Slicer-4.13/cli-modules/DSCMRIAnalysis'
 
 
 def edit_segmentation(uid: str,
-                      params: dict[str, Any],
+                      params: Dict[str, Any],
                       foreground_label: int = 1,
                       background_label: int = 0,
-                      show: bool = False) -> None:
+                      show: bool = False) -> [sitk.Image]:
     """
     :param uid: Unique identification number for an exam.
     :param params: Path and slice number parameters defined in `paths` module.
     :param foreground_label: Foreground integer value of the segmentation LabelMap (Default 1).
     :param background_label: Background integer value of the segmentation LabelMap (Default 0).
     :param show: If true, show an overlay of the final segmentation and the first slice of the first frame of the series.
-    :return: None
+    :return: The 3D image list to process in other functions downstream
     """
     print(f'Editing segmentation for {uid}')
     dcm_path = os.path.join(DATA_ROOT, DICOM_ROOT, uid, 'DICOM', params['dicom_dir'])
@@ -195,6 +85,26 @@ def edit_segmentation(uid: str,
     show_overlay(noncontrast_imgs[0], final_segm) if show else ()
     sitk.WriteImage(final_segm, os.path.join(DATA_ROOT, DERIVED_ROOT, uid, f'final_{SEGMENTATION_FILENAME}'))
 
+    return [it[0] for it in data]
+
+
+def extract_brain(uid: str, series: [sitk.Image]) -> None:
+    # Save as nifti
+    in_files = []
+    out_files = []
+    for idx, img in enumerate(series):
+        file = str(idx) + PERFUSION_3D_TMP_NIFTI_FILE
+        sitk.WriteImage(img, os.path.join(DATA_ROOT, DERIVED_ROOT, uid, file))
+        in_files.append(os.path.join(DATA_ROOT, DERIVED_ROOT, uid, file))
+        out_files.append(os.path.join(DATA_ROOT, DERIVED_ROOT, uid, f'{idx}_stripped_{file}'))
+
+    commands = [' '.join([BET_EXECUTABLE, i, o]) for i, o in zip(in_files, out_files)]
+    run_n_subprocesses(commands)
+    # Read back nifti and save 4D .nrrd image instead
+    # TODO
+    reader = sitk.ImageFileReader()
+    reader.SetFileName()
+
 
 def run_perfusion(uid: str) -> None:
     """
@@ -225,19 +135,11 @@ def run_perfusion(uid: str) -> None:
             os.path.join(root_path, PERFUSION_4D_FILE)]
 
     print('Executing DSC CLI module...')
-    print(DSC_EXECUTABLE_PATH + ' \\ \n' +
+    print(DSC_EXECUTABLE + ' \\ \n' +
           ' \\ \n    '.join([f'{args[i]} {args[j]}' for i, j in zip(range(0, len(args), 2), range(1, len(args), 2))]) +
           ' \\ \n    ' + args[len(args)-1])
 
-    process = subprocess.Popen([DSC_EXECUTABLE_PATH, *args],
-                               stdout=subprocess.PIPE,
-                               stderr=subprocess.PIPE,
-                               universal_newlines=True)
-    # `communicate()` call will wait for process to complete.
-    stdout, stderr = process.communicate()
-    print(stdout)
-    print(stderr)
-    print(f'\nProcess returned exit code {process.returncode}')
+    run_n_subprocesses([DSC_EXECUTABLE + ' ' + ' '.join(args)])
 
 
 def main():
