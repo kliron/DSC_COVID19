@@ -5,6 +5,7 @@ import sys
 import argparse
 from typing import Dict, Any
 import numpy as np
+import pandas as pd
 
 # This is to make relative imports work both when this file is run "on the fly" in an IDE
 # and when it is run as a script (as __main__). For the first case to work, the console
@@ -40,6 +41,7 @@ PERFUSION_MULTIVOLUME_FROM_NII = 'niiPerfusion.nrrd'
 # This is the file DSCMRIAnalysis module will work on
 FINAL_PERFUSION_MULTIVOLUME = 'final_Perfusion.nrrd'
 DSC_EXECUTABLE = '/Applications/Slicer.app/Contents/Extensions-30329/DSCMRIAnalysis/lib/Slicer-4.13/cli-modules/DSCMRIAnalysis'
+PLEXUS_STATS_FILE = 'plexus_stats.xlsx'
 
 
 # Step 1
@@ -131,13 +133,13 @@ def extract_brain(uid: str, series: [sitk.Image], nii_dir: str = 'nii') -> None:
     if any(exit_codes):
         print('Warning: some of the subprocesses returned nonzero exit status')
 
-    # Delete temporary nifti files
+    # Delete temporary nifti files, but don't delete the skull-stripped ones
+    # (we'll need those to convert to a MultiVolume in Slicer)
     for f in in_files:
         os.unlink(f)
 
 
-# Step 3
-# In slicer, import nifti as MultiVolume and save the file as FINAL_PERFUSION_MULTIVOLUME
+# Step 3: In slicer, import nifti as MultiVolume and save the file as FINAL_PERFUSION_MULTIVOLUME
 
 
 # Step 4
@@ -163,7 +165,7 @@ def copy_dicom_tags_to_final_multivolume(uid: str) -> None:
     final.SetOrigin(orig.GetOrigin())
     final.SetSpacing(orig.GetSpacing())
     final.SetDirection(orig.GetDirection())
-    
+
     sitk.WriteImage(final, final_mv)
 
 
@@ -174,7 +176,6 @@ def run_perfusion(uid: str) -> None:
 
     This is an example of the command that will run in a subprocess:
     /Applications/Slicer.app/Contents/Extensions-30329/DSCMRIAnalysis/lib/Slicer-4.13/cli-modules/DSCMRIAnalysis \
-            --roiMask /Users/kliron/Data/dsc_covid19/Segmentations/SEKBF00012197064/final_Plexus.nrrd \
             --aifMask /Users/kliron/Data/dsc_covid19/Segmentations/SEKBF00012197064/Artery.nrrd  \
             --outputK1 path_to_K1.nrrd \
             --outputK2 path_to_K2.nrrd \
@@ -187,11 +188,7 @@ def run_perfusion(uid: str) -> None:
     """
     print(f'Computing perfusion maps for {uid}')
     root_path = os.path.join(DATA_ROOT, DERIVED_ROOT, uid)
-    args = ['--roiMask', os.path.join(root_path, 'final_Plexus.nrrd'),
-            '--aifMask', os.path.join(root_path, 'Artery.nrrd'),
-            '--xTolerance', '0.001',
-            '--gTolerance', '0.001',
-            '--fTolerance', '0.01',
+    args = ['--aifMask', os.path.join(root_path, 'Artery.nrrd'),
             '--outputK1', os.path.join(root_path, 'K1.nrrd'),
             '--outputK2', os.path.join(root_path, 'K2.nrrd'),
             '--outputMTT', os.path.join(root_path, 'MTT.nrrd'),
@@ -206,6 +203,42 @@ def run_perfusion(uid: str) -> None:
     exit_codes = run_n_subprocesses([DSC_EXECUTABLE + ' ' + ' '.join(args)])
     if any(exit_codes):
         print('Warning: some of the subprocesses returned nonzero exit status')
+
+
+def get_statistics(write: bool = False) -> pd.DataFrame:
+    """
+    Extract statistics from the perfusion maps.
+    :param write: If True, will write an excel file of the results at PLEXUS_STATS_FILE
+    :return: Returns the Pandas dataframe of results
+    """
+    stats = pd.DataFrame(columns=['voxel_num',
+                                  'k1_mean', 'k1_std', 'k1_min', 'k1_max',
+                                  'k2_mean', 'k2_std', 'k2_min', 'k2_max',
+                                  'cbf_mean', 'cbf_std', 'cbf_min', 'cbf_max',
+                                  'mtt_mean', 'mtt_std', 'mtt_min', 'mtt_max'])
+    for uid in paths.keys():
+        print(f'Reading perfusion maps for {uid}')
+        img_root = os.path.join(DATA_ROOT, DERIVED_ROOT, uid)
+        k1, k2, mtt, cbf = (sitk.GetArrayFromImage(sitk.ReadImage(os.path.join(img_root, f))) for f in [
+            'K1.nrrd', 'K2.nrrd', 'MTT.nrrd', 'CBF.nrrd'])
+        plexus_segm = sitk.GetArrayFromImage(sitk.ReadImage(os.path.join(img_root, 'final_Plexus.nrrd')))
+
+        # Get a flat array of pixel intensity values for the plexus
+        arrays = {name: arr[plexus_segm == 1] for arr, name in zip([k1, k2, mtt, cbf], ['k1', 'k2', 'mtt', 'cbf'])}
+
+        # Descriptive statistics
+        ustats = {'voxel_num': arrays['k1'].size}
+        for k, v in arrays.items():
+            ustats[f'{k}_mean'] = np.mean(v)
+            ustats[f'{k}_std'] = np.std(v)
+            ustats[f'{k}_min'] = np.min(v)
+            ustats[f'{k}_max'] = np.max(v)
+
+        stats = stats.append(ustats, ignore_index=True)
+
+    if write:
+        stats.to_excel(os.path.join(DATA_ROOT, DERIVED_ROOT, PLEXUS_STATS_FILE), index=False)
+    return stats
 
 
 def preprocess(uids: [str]) -> None:
