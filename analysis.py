@@ -35,11 +35,14 @@ BET_EXECUTABLE = '/usr/local/fsl/bin/bet2'
 # We need this to copy the metadata tags back to the final (skull-stripped) MultiVolume that the DSC module is going to
 # work with
 ORIGINAL_PERFUSION_MULTIVOLUME = 'Perfusion.nrrd'
+# This is the file produced by reading the skull stripped nii files
+PERFUSION_MULTIVOLUME_FROM_NII = 'niiPerfusion.nrrd'
 # This is the file DSCMRIAnalysis module will work on
 FINAL_PERFUSION_MULTIVOLUME = 'final_Perfusion.nrrd'
 DSC_EXECUTABLE = '/Applications/Slicer.app/Contents/Extensions-30329/DSCMRIAnalysis/lib/Slicer-4.13/cli-modules/DSCMRIAnalysis'
 
 
+# Step 1
 def edit_segmentation(uid: str,
                       params: Dict[str, Any],
                       foreground_label: int = 1,
@@ -95,6 +98,7 @@ def edit_segmentation(uid: str,
     return series
 
 
+# Step 2
 def extract_brain(uid: str, series: [sitk.Image], nii_dir: str = 'nii') -> None:
     """
     For each of N 3D volumes in `series` a NIFTI file will be saved under DATA_ROOT/DERIVED_ROOT/${uid}/tmpdir/ directory.
@@ -132,22 +136,35 @@ def extract_brain(uid: str, series: [sitk.Image], nii_dir: str = 'nii') -> None:
         os.unlink(f)
 
 
+# Step 3
+# In slicer, import nifti as MultiVolume and save the file as FINAL_PERFUSION_MULTIVOLUME
+
+
+# Step 4
 def copy_dicom_tags_to_final_multivolume(uid: str) -> None:
     """
     Copies the image metadata needed for DSC module to be able to understand the MultiVolume from the original perfusion
     file
-    :param uid:
-    :return:
+    :param uid: Exam unique id
+    :return: None
     """
-    orig_path = os.path.join(DATA_ROOT, DERIVED_ROOT, uid, ORIGINAL_PERFUSION_MULTIVOLUME)
-    final_path = os.path.join(DATA_ROOT, DERIVED_ROOT, uid, FINAL_PERFUSION_MULTIVOLUME)
-    orig = sitk.ReadImage(orig_path)
+    print(f'Copying image metadata from original MultiVolume for {uid}')
+    orig_mv = os.path.join(DATA_ROOT, DERIVED_ROOT, uid, ORIGINAL_PERFUSION_MULTIVOLUME)
+    nii_mv = os.path.join(DATA_ROOT, DERIVED_ROOT, uid, PERFUSION_MULTIVOLUME_FROM_NII)
+    final_mv = os.path.join(DATA_ROOT, DERIVED_ROOT, uid, FINAL_PERFUSION_MULTIVOLUME)
+    orig = sitk.ReadImage(orig_mv)
     meta = {k: orig.GetMetaData(k) for k in orig.GetMetaDataKeys()}
-    final = sitk.ReadImage(final_path)
+    final = sitk.ReadImage(nii_mv)
     for k, v in meta.items():
         final.SetMetaData(k, v)
-    # Overwrites final_path
-    sitk.WriteImage(final, final_path)
+
+    # For some reason stripping slightly fucks up the image origin which causes DSC module to error out with a
+    # "Inputs do not occupy the same physical space!" message. Set origin to original image.
+    final.SetOrigin(orig.GetOrigin())
+    final.SetSpacing(orig.GetSpacing())
+    final.SetDirection(orig.GetDirection())
+    
+    sitk.WriteImage(final, final_mv)
 
 
 def run_perfusion(uid: str) -> None:
@@ -172,6 +189,9 @@ def run_perfusion(uid: str) -> None:
     root_path = os.path.join(DATA_ROOT, DERIVED_ROOT, uid)
     args = ['--roiMask', os.path.join(root_path, 'final_Plexus.nrrd'),
             '--aifMask', os.path.join(root_path, 'Artery.nrrd'),
+            '--xTolerance', '0.001',
+            '--gTolerance', '0.001',
+            '--fTolerance', '0.01',
             '--outputK1', os.path.join(root_path, 'K1.nrrd'),
             '--outputK2', os.path.join(root_path, 'K2.nrrd'),
             '--outputMTT', os.path.join(root_path, 'MTT.nrrd'),
@@ -188,37 +208,38 @@ def run_perfusion(uid: str) -> None:
         print('Warning: some of the subprocesses returned nonzero exit status')
 
 
+def preprocess(uids: [str]) -> None:
+    for uid in uids:
+        params = paths[uid]
+        series = edit_segmentation(uid, params)
+        extract_brain(uid, series)
+
+
 def main():
     parser = argparse.ArgumentParser(description='DSC perfusion analysis.',
-                                     usage=f'{sys.argv[0]} [--uid UID] --segmentation | --perfusion\n')
-    parser.add_argument('-u', '--uid', help='Specify a single UID to process', nargs=1)
-    parser.add_argument('-s', '--segmentation', action='store_true', help='Process segmentations')
-    parser.add_argument('-p', '--perfusion', action='store_true', help='Run perfusion analysis')
+                                     usage=f'{sys.argv[0]} [--uids UID1 UID2 ...] --preprocess | --perfusion\n')
+    parser.add_argument('-u', '--uids', help='Specify UIDs to process', nargs='*')
+    parser.add_argument('-p', '--preprocess', action='store_true', help='Pre-process images and segmentations')
+    parser.add_argument('-c', '--copytags', action='store_true', help='Copy DICOM tags from original to skull-stripped 4D image')
+    parser.add_argument('-r', '--perfusion', action='store_true', help='Run perfusion analysis')
     args = parser.parse_args()
-    exams = paths.items()
 
     if len(sys.argv) < 2:
         parser.print_usage()
         sys.exit(1)
 
-    if args.uid:
-        uid = args.uid[0]
-        params = paths[uid]
-        if args.segmentation:
-            edit_segmentation(uid, params, show=True)
-        elif args.perfusion:
-            run_perfusion(uid)
-        else:
-            edit_segmentation(uid, params)
-            run_perfusion(uid)
-    else:
-        if args.segmentation:
-            for uid, params in exams:
-                edit_segmentation(uid, params)
+    uids = args.uids if args.uids else [uid for uid in paths.keys()]
 
-        if args.perfusion:
-            for uid, params in exams:
-                run_perfusion(uid)
+    if args.preprocess:
+        preprocess(uids)
+
+    if args.copytags:
+        for uid in uids:
+            copy_dicom_tags_to_final_multivolume(uid)
+
+    if args.perfusion:
+        for uid in uids:
+            run_perfusion(uid)
 
 
 if __name__ == '__main__':

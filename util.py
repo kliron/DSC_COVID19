@@ -134,8 +134,9 @@ def run_n_subprocesses(commands: [str]) -> [int]:
                    universal_newlines=True) for c in commands]
     for p in procs:
         # `communicate()` call will wait for process to complete.
-        stdin, stderr = p.communicate()
-        print(stdin)
-        print(stderr)
+        stdout, stderr = p.communicate()
+        if p.returncode:
+            print(stdout)
+            print(stderr)
 
     return [p.returncode for p in procs]
