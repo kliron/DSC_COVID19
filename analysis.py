@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
+import os.path
 import sys
 import argparse
 from typing import Dict, Any
-
-import SimpleITK
 import numpy as np
 
 # This is to make relative imports work both when this file is run "on the fly" in an IDE
@@ -19,8 +17,8 @@ else:
     from .paths import paths
     from .util import *
 
-
-os.environ['SITK_SHOW_COMMAND'] = 'H:/Slicer 4.11.20210226/Slicer.exe' if os.name == 'nt' else '/Applications/Slicer.app/Contents/MacOS/Slicer'
+os.environ[
+    'SITK_SHOW_COMMAND'] = 'H:/Slicer 4.11.20210226/Slicer.exe' if os.name == 'nt' else '/Applications/Slicer.app/Contents/MacOS/Slicer'
 os.environ['FSLOUTPUTTYPE'] = 'NIFTI'  # this is to make bet2 tool not bitch when we execute it with subprocess
 
 DATA_ROOT = 'H:/Dokument' if os.name == 'nt' else '/Users/kliron'
@@ -33,8 +31,12 @@ SEGMENTATION_FILENAME = 'Plexus.nrrd'
 PERFUSION_3D_TMP_NIFTI_FILE = '_Perfusion3D.nii'
 PERFUSION_SKULL_STRIPPED_3D_FILE = '_stripped_Perfusion3d.nii'
 BET_EXECUTABLE = '/usr/local/fsl/bin/bet2'
-# Each 4D perfusion DICOM series is written to a single nrrd file to be readable from DSC Slicer module
-PERFUSION_4D_FILE = 'Perfusion4D.nrrd'
+# This file is created by importing the original DICOM series as a MultiVolume in Slicer and saving as a nrrd file
+# We need this to copy the metadata tags back to the final (skull-stripped) MultiVolume that the DSC module is going to
+# work with
+ORIGINAL_PERFUSION_MULTIVOLUME = 'Perfusion.nrrd'
+# This is the file DSCMRIAnalysis module will work on
+FINAL_PERFUSION_MULTIVOLUME = 'final_Perfusion.nrrd'
 DSC_EXECUTABLE = '/Applications/Slicer.app/Contents/Extensions-30329/DSCMRIAnalysis/lib/Slicer-4.13/cli-modules/DSCMRIAnalysis'
 
 
@@ -52,15 +54,17 @@ def edit_segmentation(uid: str,
     :return: The 3D image list to process in other functions downstream
     """
     print(f'Editing segmentation for {uid}')
+    derived_root = os.path.join(DATA_ROOT, DERIVED_ROOT, uid)
+
     dcm_path = os.path.join(DATA_ROOT, DICOM_ROOT, uid, 'DICOM', params['dicom_dir'])
-    data = read_4d_series(dcm_path)
-    segm = sitk.ReadImage(os.path.join(DATA_ROOT, DERIVED_ROOT, uid, SEGMENTATION_FILENAME))
+    series, dicom_tags = read_4d_series(dcm_path)
+    segm = sitk.ReadImage(os.path.join(derived_root, SEGMENTATION_FILENAME))
 
     # Get the average voxel values for the non-contrast series
-    noncontrast_imgs = [data[frame][0] for frame in params['noncontrast_frames']]
-    contrast_imgs = [data[frame][0] for frame in params['contrast_frames']]
-    noncontrast_avg_array = np.round(np.add(*[sitk.GetArrayFromImage(img) for img in noncontrast_imgs])/len(noncontrast_imgs)).astype(int)
-    contrast_avg_array = np.round(np.add(*[sitk.GetArrayFromImage(img) for img in contrast_imgs])/len(contrast_imgs)).astype(int)
+    noncontrast_imgs = [series[frame] for frame in params['noncontrast_frames']]
+    contrast_imgs = [series[frame] for frame in params['contrast_frames']]
+    noncontrast_avg_array = np.round(np.add(*[sitk.GetArrayFromImage(img) for img in noncontrast_imgs]) / len(noncontrast_imgs)).astype(int)
+    contrast_avg_array = np.round(np.add(*[sitk.GetArrayFromImage(img) for img in contrast_imgs]) / len(contrast_imgs)).astype(int)
 
     # To edit the segmentation itself, we save the indexes of each one of its voxels
     segm_arr = sitk.GetArrayFromImage(segm)
@@ -72,7 +76,8 @@ def edit_segmentation(uid: str,
     #
     # Remove voxels whose noncontrast minus contrast average intensity is lower than one standard deviation of the
     # average noncontrast intensity.
-    remove_condition = (noncontrast_avg_array[segm_arr == 1] - contrast_avg_array[segm_arr == 1]) < np.std(noncontrast_avg_array[segm_arr == 1])
+    remove_condition = (noncontrast_avg_array[segm_arr == 1] - contrast_avg_array[segm_arr == 1]) < np.std(
+        noncontrast_avg_array[segm_arr == 1])
 
     # Setting the voxel to 0 (the default label for background) removes it from the segmentation
     for idx, cond in zip(mask_indexes, remove_condition):
@@ -83,27 +88,66 @@ def edit_segmentation(uid: str,
     final_segm = sitk.GetImageFromArray(segm_arr)
     final_segm.CopyInformation(segm)
     show_overlay(noncontrast_imgs[0], final_segm) if show else ()
-    sitk.WriteImage(final_segm, os.path.join(DATA_ROOT, DERIVED_ROOT, uid, f'final_{SEGMENTATION_FILENAME}'))
+    sitk.WriteImage(final_segm, os.path.join(derived_root, f'final_{SEGMENTATION_FILENAME}'))
+    # with open(os.path.join(derived_root, 'dicom_tags.json'), 'w') as w:
+    #    w.write(json.dumps(dicom_tags, indent=4))
 
-    return [it[0] for it in data]
+    return series
 
 
-def extract_brain(uid: str, series: [sitk.Image]) -> None:
-    # Save as nifti
+def extract_brain(uid: str, series: [sitk.Image], nii_dir: str = 'nii') -> None:
+    """
+    For each of N 3D volumes in `series` a NIFTI file will be saved under DATA_ROOT/DERIVED_ROOT/${uid}/tmpdir/ directory.
+    BET will be run on N parallel subprocesses to extract the brain and save a new NIFTI file. Each of the new files
+    will be joined in a 4D image with JoinSeriesImageFilter which will be saved as a .nrrd file.
+    :param uid: Unique exam id
+    :param series: A list of 3D volume images representing a 4D DSC series
+    :param nii_dir: A subdirectory under which we save all temporary NIFTI files
+    :return: Paths to the final .nrrd file that was created
+    """
+    nii_path = os.path.join(DATA_ROOT, DERIVED_ROOT, uid, nii_dir)
+    if not os.path.exists(nii_path):
+        os.mkdir(nii_path)
+    else:
+        if not os.path.isdir(nii_path) or not os.access(nii_path, os.W_OK):
+            raise Exception(f'ERROR {nii_path} is not a writeable directory')
+
     in_files = []
     out_files = []
+    # Write series as a bunch of nifti files
     for idx, img in enumerate(series):
         file = str(idx) + PERFUSION_3D_TMP_NIFTI_FILE
-        sitk.WriteImage(img, os.path.join(DATA_ROOT, DERIVED_ROOT, uid, file))
-        in_files.append(os.path.join(DATA_ROOT, DERIVED_ROOT, uid, file))
-        out_files.append(os.path.join(DATA_ROOT, DERIVED_ROOT, uid, f'{idx}_stripped_{file}'))
+        sitk.WriteImage(img, os.path.join(nii_path, file))
+        in_files.append(os.path.join(nii_path, file))
+        out_files.append(os.path.join(nii_path, f'{idx}_stripped_{file}'))
 
+    # Call BET on N subprocesses to extract brain
     commands = [' '.join([BET_EXECUTABLE, i, o]) for i, o in zip(in_files, out_files)]
-    run_n_subprocesses(commands)
-    # Read back nifti and save 4D .nrrd image instead
-    # TODO
-    reader = sitk.ImageFileReader()
-    reader.SetFileName()
+    exit_codes = run_n_subprocesses(commands)
+    if any(exit_codes):
+        print('Warning: some of the subprocesses returned nonzero exit status')
+
+    # Delete temporary nifti files
+    for f in in_files:
+        os.unlink(f)
+
+
+def copy_dicom_tags_to_final_multivolume(uid: str) -> None:
+    """
+    Copies the image metadata needed for DSC module to be able to understand the MultiVolume from the original perfusion
+    file
+    :param uid:
+    :return:
+    """
+    orig_path = os.path.join(DATA_ROOT, DERIVED_ROOT, uid, ORIGINAL_PERFUSION_MULTIVOLUME)
+    final_path = os.path.join(DATA_ROOT, DERIVED_ROOT, uid, FINAL_PERFUSION_MULTIVOLUME)
+    orig = sitk.ReadImage(orig_path)
+    meta = {k: orig.GetMetaData(k) for k in orig.GetMetaDataKeys()}
+    final = sitk.ReadImage(final_path)
+    for k, v in meta.items():
+        final.SetMetaData(k, v)
+    # Overwrites final_path
+    sitk.WriteImage(final, final_path)
 
 
 def run_perfusion(uid: str) -> None:
@@ -132,14 +176,16 @@ def run_perfusion(uid: str) -> None:
             '--outputK2', os.path.join(root_path, 'K2.nrrd'),
             '--outputMTT', os.path.join(root_path, 'MTT.nrrd'),
             '--outputCBF', os.path.join(root_path, 'CBF.nrrd'),
-            os.path.join(root_path, PERFUSION_4D_FILE)]
+            os.path.join(root_path, FINAL_PERFUSION_MULTIVOLUME)]
 
     print('Executing DSC CLI module...')
     print(DSC_EXECUTABLE + ' \\ \n' +
           ' \\ \n    '.join([f'{args[i]} {args[j]}' for i, j in zip(range(0, len(args), 2), range(1, len(args), 2))]) +
-          ' \\ \n    ' + args[len(args)-1])
+          ' \\ \n    ' + args[len(args) - 1])
 
-    run_n_subprocesses([DSC_EXECUTABLE + ' ' + ' '.join(args)])
+    exit_codes = run_n_subprocesses([DSC_EXECUTABLE + ' ' + ' '.join(args)])
+    if any(exit_codes):
+        print('Warning: some of the subprocesses returned nonzero exit status')
 
 
 def main():
