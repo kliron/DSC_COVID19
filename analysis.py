@@ -161,10 +161,11 @@ def correct_and_copy_dicom_tags_to_final_multivolume(uid: str) -> None:
 
     # For some reason stripping slightly fucks up the image origin which causes DSC module to error out with a
     # "Inputs do not occupy the same physical space!" message. Set origin to original image.
-    print('Correcting origin, spacing and direction...')
+    # OBS!!! The artery and plexus masks must also have the same spacing and origin! Do not draw the segmentations on
+    # a temporary file!
+    print('Correcting origin and spacing...')
     final.SetOrigin(orig.GetOrigin())
     final.SetSpacing(orig.GetSpacing())
-    final.SetDirection(orig.GetDirection())
 
     sitk.WriteImage(final, os.path.join(DERIVED_ROOT, uid, FINAL_PERFUSION_MULTIVOLUME))
 
