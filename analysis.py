@@ -19,13 +19,12 @@ else:
     from .paths import paths
     from .util import *
 
-os.environ[
-    'SITK_SHOW_COMMAND'] = 'H:/Slicer 4.11.20210226/Slicer.exe' if os.name == 'nt' else '/Applications/Slicer.app/Contents/MacOS/Slicer'
+os.environ['SITK_SHOW_COMMAND'] = 'H:/Slicer 4.11.20210226/Slicer.exe' if os.name == 'nt' else '/Applications/Slicer.app/Contents/MacOS/Slicer'
 os.environ['FSLOUTPUTTYPE'] = 'NIFTI'  # this is to make bet2 tool not bitch when we execute it with subprocess
 
 DATA_ROOT = 'H:/Dokument' if os.name == 'nt' else '/Users/kliron'
 DICOM_ROOT = os.path.join(DATA_ROOT, 'Data/dsc_covid19/Examinations')
-DERIVED_ROOT = os.path.join(DATA_ROOT, 'Data/dsc_covid19/Derived')
+ANALYSIS_ROOT = os.path.join(DATA_ROOT, 'Data/dsc_covid19/Analysis')
 SEGMENTATION_FILENAME = 'Plexus.nrrd'
 # BET (brain extraction tool) does not support 4D images. We need to convert each 4D series to a list of 3D images,
 # save it to a temporary nifti file, call BET to process it, and convert the output back to nrrd which is the format the
@@ -38,12 +37,15 @@ BET_EXECUTABLE = '/usr/local/fsl/bin/bet2'
 # work with
 ORIGINAL_PERFUSION_MULTIVOLUME = 'Perfusion.nrrd'
 NII_DIR = 'nii'
+DERIVED_DIR = 'derived'
+EXTRACTED_PERFUSION = 'XPerf.nrrd'
 # This is the file produced by reading the skull stripped nii files
 # This is the file DSCMRIAnalysis module will work on
 FINAL_PERFUSION_MULTIVOLUME = 'final_Perfusion.nrrd'
 DSC_EXECUTABLE = '/Applications/Slicer.app/Contents/Extensions-30329/DSCMRIAnalysis/lib/Slicer-4.13/cli-modules/DSCMRIAnalysis'
-PLEXUS_STATS_FILE = os.path.join(DERIVED_ROOT, 'plexus_stats.xlsx')
-PERFUSION_DATA_FILE = os.path.join(DERIVED_ROOT, 'perfusion_data.xlsx')
+PLEXUS_STATS_FILE = os.path.join(ANALYSIS_ROOT, 'plexus_stats.xlsx')
+PERFUSION_DATA_FILE = os.path.join(ANALYSIS_ROOT, 'perfusion_data.xlsx')
+ADDITIONAL_DATA_FILE = os.path.join(ANALYSIS_ROOT, 'data.xlsx')
 
 
 # Step 1
@@ -59,11 +61,11 @@ def edit_segmentation(uid: str,
     :return: The 3D image list to process in other functions downstream
     """
     print(f'Editing segmentation for {uid}')
-    derived_root = os.path.join(DERIVED_ROOT, uid)
+    analysis_root = os.path.join(ANALYSIS_ROOT, uid)
     params = paths[uid]
     dcm_path = os.path.join(DICOM_ROOT, uid, 'DICOM', params['dicom_dir'])
     series, dicom_tags = read_4d_series(dcm_path)
-    segm = sitk.ReadImage(os.path.join(derived_root, SEGMENTATION_FILENAME))
+    segm = sitk.ReadImage(os.path.join(analysis_root, SEGMENTATION_FILENAME))
 
     # Get the average voxel values for the non-contrast series
     noncontrast_imgs = [series[frame] for frame in params['noncontrast_frames']]
@@ -93,24 +95,24 @@ def edit_segmentation(uid: str,
     final_segm = sitk.GetImageFromArray(segm_arr)
     final_segm.CopyInformation(segm)
     show_overlay(noncontrast_imgs[0], final_segm) if show else ()
-    sitk.WriteImage(final_segm, os.path.join(derived_root, f'final_{SEGMENTATION_FILENAME}'))
-    # with open(os.path.join(derived_root, 'dicom_tags.json'), 'w') as w:
-    #    w.write(json.dumps(dicom_tags, indent=4))
-
+    derived_dir = os.path.join(analysis_root, DERIVED_DIR)
+    if not os.path.exists(derived_dir):
+        os.mkdir(derived_dir)
+    sitk.WriteImage(final_segm, os.path.join(derived_dir, f'final_{SEGMENTATION_FILENAME}'))
     return series
 
 
 # Step 2
 def extract_brain(uid: str, series: [sitk.Image]) -> None:
     """
-    For each of N 3D volumes in `series` a NIFTI file will be saved under DERIVED_ROOT/${uid}/tmpdir/ directory.
+    For each of N 3D volumes in `series` a NIFTI file will be saved under ANALYSIS_ROOT/${uid}/tmpdir/ directory.
     BET will be run on N parallel subprocesses to extract the brain and save a new NIFTI file. Each of the new files
     will be joined in a 4D image with JoinSeriesImageFilter which will be saved as a .nrrd file.
     :param uid: Unique exam id
     :param series: A list of 3D volume images representing a 4D DSC series
     :return: Paths to the final .nrrd file that was created
     """
-    nii_path = os.path.join(DERIVED_ROOT, uid, NII_DIR)
+    nii_path = os.path.join(ANALYSIS_ROOT, uid, DERIVED_DIR, NII_DIR)
     if not os.path.exists(nii_path):
         os.mkdir(nii_path)
     else:
@@ -137,73 +139,77 @@ def extract_brain(uid: str, series: [sitk.Image]) -> None:
     for f in in_files:
         os.unlink(f)
 
-###################################################################################################
-#                                                                                                 #
-# STEP 3: In slicer, import nifti as MultiVolume and save the file as FINAL_PERFUSION_MULTIVOLUME #
-#                                                                                                 #
-###################################################################################################
+#####################################################################################
+#                                                                                   #
+# STEP 3: In slicer, import nifti as MultiVolume and save the file as EXT_PERFUSION #
+#                                                                                   #
+#####################################################################################
 
 
 # Step 4
 def correct_and_copy_dicom_tags_to_final_multivolume(uid: str) -> None:
     """
-    Copies the image metadata needed for DSC module to be able to understand the MultiVolume from the original perfusion
-    file
+    1. Copies the image metadata needed for DSC module to be able to understand the MultiVolume from the original perfusion
+       file.
+    2. Copies the Origin and Spacing information from the original image. That is because skull-stripping with BET
+       causes a miniscule (in the order of 0.000001 cm) distortion of the image which is still above Tolerance level
+       for ITK's ImageFilter class and causes DSC module to error out with a "Inputs do not occupy the same physical
+       space!" message.
+       As the AIF function is *crucial* for correct perfusion analysis, make sure to select the Artery segmentation on
+       the FINAL image that DSC will process. Otherwise you will have to set the Origin and Spacing even in the
+       segmentation!
     :param uid: Exam unique id
     :return: None
     """
     print(f'Copying image metadata from original MultiVolume for {uid}...')
-    orig = sitk.ReadImage(os.path.join(DERIVED_ROOT, uid, ORIGINAL_PERFUSION_MULTIVOLUME))
-    final = sitk.ReadImage(os.path.join(DERIVED_ROOT, uid, f'{uid}.nrrd'))
-
+    orig = sitk.ReadImage(os.path.join(ANALYSIS_ROOT, uid, ORIGINAL_PERFUSION_MULTIVOLUME))
+    ext = sitk.ReadImage(os.path.join(ANALYSIS_ROOT, uid, DERIVED_DIR, EXTRACTED_PERFUSION))
     for k in orig.GetMetaDataKeys():
-        final.SetMetaData(k, orig.GetMetaData(k))
+        ext.SetMetaData(k, orig.GetMetaData(k))
 
-    # For some reason stripping slightly fucks up the image origin which causes DSC module to error out with a
-    # "Inputs do not occupy the same physical space!" message. Set origin to original image.
-    # OBS!!! The artery and plexus masks must also have the same spacing and origin! Do not draw the segmentations on
-    # a temporary file!
     print('Correcting origin and spacing...')
-    final.SetOrigin(orig.GetOrigin())
-    final.SetSpacing(orig.GetSpacing())
+    ext.SetOrigin(orig.GetOrigin())
+    ext.SetSpacing(orig.GetSpacing())
+    sitk.WriteImage(ext, os.path.join(ANALYSIS_ROOT, uid, DERIVED_DIR, FINAL_PERFUSION_MULTIVOLUME))
 
-    sitk.WriteImage(final, os.path.join(DERIVED_ROOT, uid, FINAL_PERFUSION_MULTIVOLUME))
 
-
-def run_perfusion(uid: str) -> None:
+def run_perfusion(uid: str, show=False) -> None:
     """
     Uses DSCMRIAnalysis Slicer CLI module (https://www.slicer.org/w/index.php/Documentation/Nightly/Modules/DSC_MRI_Analysis)
     to extract perfusion maps for all examinations using the final segmentations created by the step above as ROI.
 
     This is an example of the command that will run in a subprocess:
     /Applications/Slicer.app/Contents/Extensions-30329/DSCMRIAnalysis/lib/Slicer-4.13/cli-modules/DSCMRIAnalysis \
-            --aifMask /Users/kliron/Data/dsc_covid19/Derived/SEKBF00012197064/Artery.nrrd  \
-            --outputK1 path_to_K1.nrrd \
-            --outputK2 path_to_K2.nrrd \
-            --outputMTT path_to_MTT.nrrd \
-            --outputCBF path_to_CBF.nrrd \
+            --aifMask /Users/kliron/Data/dsc_covid19/0_SEKBF00012197064/Artery.nrrd  \
+            --outputK1 /Users/kliron/Data/dsc_covid19/Derived/0_SEKBF00012197064/K1.nrrd \
+            --outputK2 /Users/kliron/Data/dsc_covid19/Derived/0_SEKBF00012197064/K2.nrrd \
+            --outputMTT /Users/kliron/Data/dsc_covid19/Derived/0_SEKBF00012197064/MTT.nrrd \
+            --outputCBF /Users/kliron/Data/dsc_covid19/Derived/0_SEKBF00012197064/CBF.nrrd \
             /Users/kliron/Downloads/multivolume.nrrd
 
     :param uid: Unique exam ID string
+    :param show: If True, show resulting CBF map
     :return: None
     """
     print(f'Computing perfusion maps for {uid}')
-    root_path = os.path.join(DERIVED_ROOT, uid)
-    args = ['--aifMask', os.path.join(root_path, 'Artery.nrrd'),
-            '--outputK1', os.path.join(root_path, 'K1.nrrd'),
-            '--outputK2', os.path.join(root_path, 'K2.nrrd'),
-            '--outputMTT', os.path.join(root_path, 'MTT.nrrd'),
-            '--outputCBF', os.path.join(root_path, 'CBF.nrrd'),
-            os.path.join(root_path, FINAL_PERFUSION_MULTIVOLUME)]
+    fpath = os.path.join(ANALYSIS_ROOT, uid)
+    args = ['--aifMask', os.path.join(fpath, 'Artery.nrrd'),
+            '--outputK1', os.path.join(fpath, DERIVED_DIR, 'K1.nrrd'),
+            '--outputK2', os.path.join(fpath, DERIVED_DIR, 'K2.nrrd'),
+            '--outputMTT', os.path.join(fpath, DERIVED_DIR, 'MTT.nrrd'),
+            '--outputCBF', os.path.join(fpath, DERIVED_DIR, 'CBF.nrrd'),
+            os.path.join(fpath, DERIVED_DIR, FINAL_PERFUSION_MULTIVOLUME)]
 
     print('Executing DSC CLI module...')
     print(DSC_EXECUTABLE + ' \\ \n' +
           ' \\ \n    '.join([f'{args[i]} {args[j]}' for i, j in zip(range(0, len(args), 2), range(1, len(args), 2))]) +
           ' \\ \n    ' + args[len(args) - 1])
-
     exit_codes = run_n_subprocesses([DSC_EXECUTABLE + ' ' + ' '.join(args)])
     if any(exit_codes):
         print('Warning: some of the subprocesses returned nonzero exit status')
+    if show:
+        img = sitk.ReadImage(os.path.join(fpath, DERIVED_DIR, 'CBF.nrrd'))
+        sitk.Show(img, title=f'{uid}, CBF map')
 
 
 def get_statistics(write: bool = False) -> pd.DataFrame:
@@ -215,14 +221,14 @@ def get_statistics(write: bool = False) -> pd.DataFrame:
     stats = pd.DataFrame()
     for uid in paths.keys():
         print(f'Reading perfusion maps for {uid}')
-        img_root = os.path.join(DERIVED_ROOT, uid)
+        img_root = os.path.join(ANALYSIS_ROOT, uid, DERIVED_DIR)
         # By default GetArrayFromImage returns float32 values which may cause precision errors. We convert to float64.
         k1, k2, mtt, cbf = (np.float64(sitk.GetArrayFromImage(sitk.ReadImage(os.path.join(img_root, f)))) for f in [
             'K1.nrrd', 'K2.nrrd', 'MTT.nrrd', 'CBF.nrrd'])
         plexus_segm = sitk.GetArrayFromImage(sitk.ReadImage(os.path.join(img_root, 'final_Plexus.nrrd')))
 
         # Get a flat array of pixel intensity values for the whole brain and the plexus
-        # A few voxels may have NaN values after skull-stripping we set them to 0.0 by callin np.nan_to_num()
+        # A few voxels may have NaN values after skull-stripping we set them to 0.0 by calling np.nan_to_num()
         brain_values = {name: arr for arr, name in zip([k1, k2, mtt, cbf], ['K1', 'K2', 'MTT', 'CBF'])}
         plexus_values = {name: arr[plexus_segm == 1] for arr, name in zip([k1, k2, mtt, cbf], ['K1', 'K2', 'MTT', 'CBF'])}
 
@@ -231,7 +237,8 @@ def get_statistics(write: bool = False) -> pd.DataFrame:
         for k, v in plexus_values.items():
             # Get the mean brain value and normalize the mean plexus value
             brain_vals = brain_values[k]
-            brain_mean = np.mean(brain_vals)
+            # Some voxels may have NaN values after processing, that is why we call np.nanmean() instead of np.mean()
+            brain_mean = np.nanmean(brain_vals)
             ustats[f'{k}'] = np.mean(v)
             ustats[f'{k}_norm'] = ustats[f'{k}']/brain_mean
             ustats[f'{k}_std'] = np.std(v)
@@ -241,7 +248,7 @@ def get_statistics(write: bool = False) -> pd.DataFrame:
         stats = stats.append(ustats, ignore_index=True)
 
     # Read optic sheath and mars data
-    data = pd.read_csv('/Users/kliron/Downloads/sheath.csv')
+    data = pd.read_excel(ADDITIONAL_DATA_FILE)
     df = stats.merge(data, how='left', on='uid')
     df['CBV_norm'] = df['CBF_norm'] * df['MTT_norm']
     df['CBV'] = df['CBF'] * df['MTT']
@@ -271,38 +278,23 @@ def get_statistics(write: bool = False) -> pd.DataFrame:
     t4, p4, d4 = ttest_ind(high_icp_k1, norm_icp_k1)
     t5, p5, d5 = ttest_ind(high_icp_k2, norm_icp_k2)
 
-    print(f'Independent Two-sample T-test. Null hypothesis is average CBF values are equal. P-value: {p1}')
-    print(f'Independent Two-sample T-test. Null hypothesis is average CBV values are equal. P-value: {p2}')
-    print(f'Independent Two-sample T-test. Null hypothesis is average MTT values are equal. P-value: {p3}')
-    print(f'Independent Two-sample T-test. Null hypothesis is average K1 values are equal. P-value: {p4}')
-    print(f'Independent Two-sample T-test. Null hypothesis is average K2 values are equal. P-value: {p5}')
-
-    plt.hist(high_icp_cbf)
-    plt.hist(norm_icp_cbf)
-    plt.close()
+    print(f'Independent Two-sample T-test for CBF, p = {p1}')
+    print(f'Independent Two-sample T-test for CBV, p = {p2}')
+    print(f'Independent Two-sample T-test for MTT, p = {p3}')
+    print(f'Independent Two-sample T-test for K1, p = {p4}')
+    print(f'Independent Two-sample T-test for K2, p = {p5}')
 
     return df
 
 
-def clean_derived_files(wipeout: bool = False):
-    """
-    Deletes all machine-derived files in the DERIVED_ROOT folder. If wipeout is True, even deletes the
-    f'{uid}.nrrd perfusion file
-    """
+def clean_derived_files():
+    """Deletes all machine-derived files in the ANALYSIS_ROOT."""
+    if input(f'This will delete ALL "{DERIVED_DIR}" directories under {os.path.join(DATA_ROOT, ANALYSIS_ROOT) + "/{uid}/"}, are you sure? (Y/N)') != 'Y':
+        exit(0)
     for uid in paths.keys():
-        remove_files = [os.path.join(DERIVED_ROOT, uid, f) for f in ['K1.nrrd', 'K2.nrrd', 'CBF.nrrd', 'MTT.nrrd',
-                                                                     'final_Plexus.nrrd',
-                                                                     FINAL_PERFUSION_MULTIVOLUME,
-                                                                     NII_DIR]]
-        if wipeout:
-            remove_files.append(os.path.join(DERIVED_ROOT, uid, f'{uid}.nrrd'))
-
-        for f in remove_files:
-            print(f'Removing {f}')
-            try:
-                shutil.rmtree(f) if os.path.isdir(f) else os.unlink(f)
-            except FileNotFoundError:
-                continue
+        derived = os.path.join(ANALYSIS_ROOT, uid, DERIVED_DIR)
+        if os.path.exists(derived):
+            shutil.rmtree(derived)
 
 
 def preprocess(uids: [str]) -> None:
@@ -319,6 +311,7 @@ def main():
     parser.add_argument('-p', '--preprocess', action='store_true', help='Pre-process images and segmentations')
     parser.add_argument('-c', '--copytags', action='store_true', help='Copy DICOM tags from original to skull-stripped 4D image')
     parser.add_argument('-r', '--perfusion', action='store_true', help='Run perfusion analysis')
+    parser.add_argument('-x', '--clean', action='store_true', help='Clean all derived data')
     args = parser.parse_args()
 
     if len(sys.argv) < 2:
@@ -326,6 +319,9 @@ def main():
         sys.exit(1)
 
     uids = args.uids if args.uids else [uid for uid in paths.keys()]
+
+    if args.clean:
+        clean_derived_files()
 
     if args.preprocess:
         preprocess(uids)
@@ -336,7 +332,7 @@ def main():
 
     if args.perfusion:
         for uid in uids:
-            run_perfusion(uid)
+            run_perfusion(uid, show=len(args.uids) != 0)
 
 
 if __name__ == '__main__':
