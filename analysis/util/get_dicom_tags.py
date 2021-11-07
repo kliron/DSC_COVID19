@@ -4,7 +4,7 @@ import sys
 
 # Download the html tag list from https://www.dicomlibrary.com/dicom/dicom-tags/
 default_html_path = '/Users/kliron/Downloads/DICOMlib.html'
-default_out = './dicom_tags.json'
+default_out = '../../dicom_tags.json'
 
 
 def get_tags(path: str, out: str) -> None:

@@ -7,45 +7,25 @@ import numpy as np
 import pandas as pd
 from statsmodels.stats.weightstats import ttest_ind
 import shutil
+import re
 
 # This is to make relative imports work both when this file is run "on the fly" in an IDE
 # and when it is run as a script (as __main__). For the first case to work, the console
 # must of course cd in the directory this file is in.
 parent_module = sys.modules['.'.join(__name__.split('.')[:-1]) or '__main__']
 if __name__ == '__main__' or parent_module.__name__ == '__main__':
-    from paths import paths
-    from util import *
+    from util.paths import *
+    from util.util import *
 else:
-    from .paths import paths
-    from .util import *
+    # Create an empty CMakeLists.txt file and reload it.
+    # In order for CLion to be able to import local python modules you have to mark the directory containing them as
+    # "sources". There is a bug in Clion where the context menu is missing "mark directory as". To workaround create an
+    # empty CMakeLists.txt file, reload the project and the option will appear.
+    from .util.paths import paths
+    from .util.util import *
 
 os.environ['SITK_SHOW_COMMAND'] = 'H:/Slicer 4.11.20210226/Slicer.exe' if os.name == 'nt' else '/Applications/Slicer.app/Contents/MacOS/Slicer'
 os.environ['FSLOUTPUTTYPE'] = 'NIFTI'  # this is to make bet2 tool not bitch when we execute it with subprocess
-
-DATA_ROOT = 'H:/Dokument' if os.name == 'nt' else '/Users/kliron'
-DICOM_ROOT = os.path.join(DATA_ROOT, 'Data/dsc_covid19/Examinations')
-ANALYSIS_ROOT = os.path.join(DATA_ROOT, 'Data/dsc_covid19/Analysis')
-SEGMENTATION_FILENAME = 'Plexus.nrrd'
-# BET (brain extraction tool) does not support 4D images. We need to convert each 4D series to a list of 3D images,
-# save it to a temporary nifti file, call BET to process it, and convert the output back to nrrd which is the format the
-# DSC Slicer module expects
-PERFUSION_3D_TMP_NIFTI_FILE = '_Perfusion3D.nii'
-PERFUSION_SKULL_STRIPPED_3D_FILE = '_stripped_Perfusion3d.nii'
-BET_EXECUTABLE = '/usr/local/fsl/bin/bet2'
-# This file is created by importing the original DICOM series as a MultiVolume in Slicer and saving as a nrrd file
-# We need this to copy the metadata tags back to the final (skull-stripped) MultiVolume that the DSC module is going to
-# work with
-ORIGINAL_PERFUSION_MULTIVOLUME = 'Perfusion.nrrd'
-NII_DIR = 'nii'
-DERIVED_DIR = 'derived'
-EXTRACTED_PERFUSION = 'XPerf.nrrd'
-# This is the file produced by reading the skull stripped nii files
-# This is the file DSCMRIAnalysis module will work on
-FINAL_PERFUSION_MULTIVOLUME = 'final_Perfusion.nrrd'
-DSC_EXECUTABLE = '/Applications/Slicer.app/Contents/Extensions-30329/DSCMRIAnalysis/lib/Slicer-4.13/cli-modules/DSCMRIAnalysis'
-PLEXUS_STATS_FILE = os.path.join(ANALYSIS_ROOT, 'plexus_stats.xlsx')
-PERFUSION_DATA_FILE = os.path.join(ANALYSIS_ROOT, 'perfusion_data.xlsx')
-ADDITIONAL_DATA_FILE = os.path.join(ANALYSIS_ROOT, 'data.xlsx')
 
 
 # Step 1
@@ -54,6 +34,11 @@ def edit_segmentation(uid: str,
                       background_label: int = 0,
                       show: bool = False) -> [sitk.Image]:
     """
+    We remove voxels that contain calcifications or don't take up gadolinium from the plexus segmentation.
+
+    Segmentations are saved as labelmaps where each voxel belonging to the segmentation has the value 1 (default)
+    and the rest the value 0. Thus, by using orig_img_arr[segm == 1] we can index into the original image and get the
+    voxels corresponding to the volume of the segmentation.
     :param uid: Unique identification number for an exam.
     :param foreground_label: Foreground integer value of the segmentation LabelMap (Default 1).
     :param background_label: Background integer value of the segmentation LabelMap (Default 0).
@@ -73,17 +58,14 @@ def edit_segmentation(uid: str,
     noncontrast_avg_array = np.round(np.add(*[sitk.GetArrayFromImage(img) for img in noncontrast_imgs]) / len(noncontrast_imgs)).astype(int)
     contrast_avg_array = np.round(np.add(*[sitk.GetArrayFromImage(img) for img in contrast_imgs]) / len(contrast_imgs)).astype(int)
 
-    # To edit the segmentation itself, we save the indexes of each one of its voxels
     segm_arr = sitk.GetArrayFromImage(segm)
+    # Get a list of all voxel indexes that belong to the segmentation
     mask_indexes = list(zip(*np.where(segm_arr == foreground_label)))
 
-    # Segmentations are saved as labelmaps where each voxel belonging to the segmentation has the value 1 (default)
-    # and the rest the value 0. Thus, by using orig_img_arr[segm == 1] we can index into the original image and get the
-    # voxels corresponding to the volume of the segmentation.
-    #
-    # Remove voxels whose noncontrast minus contrast average intensity is lower than one standard deviation of the
+    # Remove voxels where the absolute value of the intensity difference between noncontrast minus contrast average
+    # intensity is lower than one standard deviation of the
     # average noncontrast intensity.
-    remove_condition = (noncontrast_avg_array[segm_arr == 1] - contrast_avg_array[segm_arr == 1]) < np.std(
+    remove_condition = np.abs((noncontrast_avg_array[segm_arr == 1] - contrast_avg_array[segm_arr == 1])) < np.std(
         noncontrast_avg_array[segm_arr == 1])
 
     # Setting the voxel to 0 (the default label for background) removes it from the segmentation
@@ -103,15 +85,17 @@ def edit_segmentation(uid: str,
 
 
 # Step 2
-def extract_brain(uid: str, series: [sitk.Image]) -> None:
+def extract_brain(uid: str) -> None:
     """
     For each of N 3D volumes in `series` a NIFTI file will be saved under ANALYSIS_ROOT/${uid}/tmpdir/ directory.
     BET will be run on N parallel subprocesses to extract the brain and save a new NIFTI file. Each of the new files
     will be joined in a 4D image with JoinSeriesImageFilter which will be saved as a .nrrd file.
     :param uid: Unique exam id
-    :param series: A list of 3D volume images representing a 4D DSC series
     :return: Paths to the final .nrrd file that was created
     """
+    params = paths[uid]
+    dcm_path = os.path.join(DICOM_ROOT, uid, 'DICOM', params['dicom_dir'])
+    series, dicom_tags = read_4d_series(dcm_path)
     nii_path = os.path.join(ANALYSIS_ROOT, uid, DERIVED_DIR, NII_DIR)
     if not os.path.exists(nii_path):
         os.mkdir(nii_path)
@@ -212,25 +196,26 @@ def run_perfusion(uid: str, show=False) -> None:
         sitk.Show(img, title=f'{uid}, CBF map')
 
 
-def get_statistics(write: bool = False) -> pd.DataFrame:
+def get_statistics(use_isp_maps=True, write: bool = True) -> pd.DataFrame:
     """
     Extract statistics from the perfusion maps.
+    :param use_isp_maps: If true (default) will use the Philips ISP perfusion maps for all measurements
     :param write: If True, will write an excel file of the results at PLEXUS_STATS_FILE
     :return: Returns the Pandas dataframe of results
     """
     stats = pd.DataFrame()
     for uid in paths.keys():
         print(f'Reading perfusion maps for {uid}')
-        img_root = os.path.join(ANALYSIS_ROOT, uid, DERIVED_DIR)
+        img_root = os.path.join(ANALYSIS_ROOT, uid) if use_isp_maps else os.path.join(ANALYSIS_ROOT, uid, DERIVED_DIR)
         # By default GetArrayFromImage returns float32 values which may cause precision errors. We convert to float64.
-        k1, k2, mtt, cbf = (np.float64(sitk.GetArrayFromImage(sitk.ReadImage(os.path.join(img_root, f)))) for f in [
-            'K1.nrrd', 'K2.nrrd', 'MTT.nrrd', 'CBF.nrrd'])
-        plexus_segm = sitk.GetArrayFromImage(sitk.ReadImage(os.path.join(img_root, 'final_Plexus.nrrd')))
+        k1, k2, mtt, cbf, cbv = (np.float64(sitk.GetArrayFromImage(sitk.ReadImage(os.path.join(img_root, f)))) for f in [
+            'K1.nrrd', 'K2.nrrd', 'MTT.nrrd', 'CBF.nrrd', 'CBV.nrrd'])
+        plexus_segm = sitk.GetArrayFromImage(sitk.ReadImage(os.path.join(ANALYSIS_ROOT, uid, DERIVED_DIR, 'final_Plexus.nrrd')))
 
         # Get a flat array of pixel intensity values for the whole brain and the plexus
         # A few voxels may have NaN values after skull-stripping we set them to 0.0 by calling np.nan_to_num()
-        brain_values = {name: arr for arr, name in zip([k1, k2, mtt, cbf], ['K1', 'K2', 'MTT', 'CBF'])}
-        plexus_values = {name: arr[plexus_segm == 1] for arr, name in zip([k1, k2, mtt, cbf], ['K1', 'K2', 'MTT', 'CBF'])}
+        brain_values = {name: arr for arr, name in zip([k1, k2, mtt, cbf, cbv], ['K1', 'K2', 'MTT', 'CBF', 'CBV'])}
+        plexus_values = {name: arr[plexus_segm == 1] for arr, name in zip([k1, k2, mtt, cbf, cbv], ['K1', 'K2', 'MTT', 'CBF', 'CBV'])}
 
         # Descriptive statistics
         ustats = {'uid': uid, 'n_voxels_brain': brain_values['K1'].size, 'n_voxels_plexus': plexus_values['K1'].size}
@@ -240,19 +225,18 @@ def get_statistics(write: bool = False) -> pd.DataFrame:
             # Some voxels may have NaN values after processing, that is why we call np.nanmean() instead of np.mean()
             brain_mean = np.nanmean(brain_vals)
             ustats[f'{k}'] = np.mean(v)
-            ustats[f'{k}_norm'] = ustats[f'{k}']/brain_mean
             ustats[f'{k}_std'] = np.std(v)
             ustats[f'{k}_min'] = np.min(v)
             ustats[f'{k}_max'] = np.max(v)
+            # Normalized by the whole brain mean
+            ustats[f'{k}_norm'] = ustats[f'{k}']/brain_mean
 
         stats = stats.append(ustats, ignore_index=True)
 
     # Read optic sheath and mars data
     data = pd.read_excel(ADDITIONAL_DATA_FILE)
     df = stats.merge(data, how='left', on='uid')
-    df['CBV_norm'] = df['CBF_norm'] * df['MTT_norm']
-    df['CBV'] = df['CBF'] * df['MTT']
-    df = df[['uid', 'optic_sheath', 'mars',
+    df = df[['uid', 'optic_sheath', 'mars', 'iva',
              'CBF_norm', 'CBV_norm', 'MTT_norm', 'K1_norm', 'K2_norm',
              'CBF', 'CBV', 'MTT', 'K1', 'K2',
              'CBF_std', 'MTT_std', 'K1_std', 'K2_std',
@@ -262,19 +246,19 @@ def get_statistics(write: bool = False) -> pd.DataFrame:
     if write:
         df.to_excel(PLEXUS_STATS_FILE, index=False)
 
-    high_icp_cbf = df.loc[df['optic_sheath'] == 1, 'CBF']
-    norm_icp_cbf = df.loc[df['optic_sheath'] == 0, 'CBF']
-    high_icp_mtt = df.loc[df['optic_sheath'] == 1, 'MTT']
-    norm_icp_mtt = df.loc[df['optic_sheath'] == 0, 'MTT']
-    high_icp_cbv = high_icp_cbf * high_icp_mtt
-    norm_icp_cbv = norm_icp_cbf * norm_icp_mtt
-    high_icp_k1 = df.loc[df['optic_sheath'] == 1, 'K1']
-    norm_icp_k1 = df.loc[df['optic_sheath'] == 0, 'K1']
-    high_icp_k2 = df.loc[df['optic_sheath'] == 1, 'K2']
-    norm_icp_k2 = df.loc[df['optic_sheath'] == 0, 'K2']
-    t1, p1, d1 = ttest_ind(high_icp_cbv, norm_icp_cbf)
+    high_icp_cbf = df.loc[df['optic_sheath'] == 1, 'CBF_norm']
+    norm_icp_cbf = df.loc[df['optic_sheath'] == 0, 'CBF_norm']
+    high_icp_cbv = df.loc[df['optic_sheath'] == 1, 'CBV_norm']
+    norm_icp_cbv = df.loc[df['optic_sheath'] == 0, 'CBV_norm']
+    high_icp_mtt = df.loc[df['optic_sheath'] == 1, 'MTT_norm']
+    norm_icp_mtt = df.loc[df['optic_sheath'] == 0, 'MTT_norm']
+    high_icp_k1 = df.loc[df['optic_sheath'] == 1, 'K1_norm']
+    norm_icp_k1 = df.loc[df['optic_sheath'] == 0, 'K1_norm']
+    high_icp_k2 = df.loc[df['optic_sheath'] == 1, 'K2_norm']
+    norm_icp_k2 = df.loc[df['optic_sheath'] == 0, 'K2_norm']
+    t1, p1, d1 = ttest_ind(high_icp_cbf, norm_icp_cbf)
     t2, p2, d2 = ttest_ind(high_icp_cbv, norm_icp_cbv)
-    t3, p3, d3 = ttest_ind(high_icp_cbv, norm_icp_mtt)
+    t3, p3, d3 = ttest_ind(high_icp_mtt, norm_icp_mtt)
     t4, p4, d4 = ttest_ind(high_icp_k1, norm_icp_k1)
     t5, p5, d5 = ttest_ind(high_icp_k2, norm_icp_k2)
 
@@ -297,21 +281,50 @@ def clean_derived_files():
             shutil.rmtree(derived)
 
 
-def preprocess(uids: [str]) -> None:
-    for uid in uids:
-        params = paths[uid]
-        series = edit_segmentation(uid, params)
-        extract_brain(uid, series)
+def save_nrrd_from_isp_dicom() -> None:
+    """Reads the DICOM files from Philips ISP perfusion results. Asks user for name of sequence to save."""
+    imply_yes = False
+    for uid, vals in paths.items():
+        dcm_root = os.path.join(ISP_ROOT, uid, 'DICOM', vals['isp_dicom_root'])
+        dcm_dirs = vals['isp_dicom_dirs']
+        for dcm_dir in dcm_dirs:
+            dcm_path = os.path.join(dcm_root, dcm_dir)
+            print(f'Trying to read 3D series at {dcm_path}')
+            img, tags = read_3d_series(dcm_path)
+            # ISP saves the type of image under 'Image Type' tag
+            img_type = tags['Image Type']
+            m = re.match(r'.*?(MTT|CBF|CBV|K1|K2).*', img_type)
+            if not m or not m.group(1):
+                print(f'Could not find any matching perfusion type for {uid}.')
+                print(f'Image type information in the DICOM was: {img_type}')
+                print('Skipping...')
+                continue
+            else:
+                ptype = m.group(1)
+                out_path = os.path.join(DATA_ROOT, ANALYSIS_ROOT, uid, f'{ptype}.nrrd')
+                print(f'Found the type {ptype}. Will save at {out_path}')
+                if not imply_yes:
+                    choice = input('Is this correct [y/n/A]?')
+                    imply_yes = choice == 'A'
+                    if choice == 'y':
+                        sitk.WriteImage(img, out_path)
+                    else:
+                        print('Skipping...')
+                else:
+                    sitk.WriteImage(img, out_path)
 
 
 def main():
     parser = argparse.ArgumentParser(description='DSC perfusion analysis.',
                                      usage=f'{sys.argv[0]} [--uids UID1 UID2 ...] --preprocess | --perfusion\n')
     parser.add_argument('-u', '--uids', help='Specify UIDs to process', nargs='*')
-    parser.add_argument('-p', '--preprocess', action='store_true', help='Pre-process images and segmentations')
+    parser.add_argument('-e', '--edit_segmentations', action='store_true', help='Remove voxels with calcifications and voxels that do not take up contrast from plexus segmentations')
+    parser.add_argument('-b', '--extract_brain', action='store_true', help='Call BET tool to extract brain from perfusion series')
     parser.add_argument('-c', '--copytags', action='store_true', help='Copy DICOM tags from original to skull-stripped 4D image')
     parser.add_argument('-r', '--perfusion', action='store_true', help='Run perfusion analysis')
     parser.add_argument('-x', '--clean', action='store_true', help='Clean all derived data')
+    parser.add_argument('-i', '--isp', action='store_true', help='Save DICOM ISP perfusion maps as .nrrd')
+    parser.add_argument('-a', '--analysis', action='store_true', help='Get statistics from final data')
     args = parser.parse_args()
 
     if len(sys.argv) < 2:
@@ -323,8 +336,16 @@ def main():
     if args.clean:
         clean_derived_files()
 
-    if args.preprocess:
-        preprocess(uids)
+    if args.isp:
+        save_nrrd_from_isp_dicom()
+
+    if args.edit_segmentations:
+        for uid in uids:
+            edit_segmentation(uid)
+
+    if args.extract_brain:
+        for uid in uids:
+            extract_brain(uid)
 
     if args.copytags:
         for uid in uids:
@@ -333,6 +354,9 @@ def main():
     if args.perfusion:
         for uid in uids:
             run_perfusion(uid, show=len(args.uids) != 0)
+
+    if args.analysis:
+        get_statistics()
 
 
 if __name__ == '__main__':
