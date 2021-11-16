@@ -235,8 +235,14 @@ def get_statistics(use_isp_maps=True, write: bool = True) -> pd.DataFrame:
 
     # Read optic sheath and mars data
     data = pd.read_excel(ADDITIONAL_DATA_FILE)
+    d1 = pd.read_excel('/Users/kliron/Data/covid19/Radiology2020/clinical.xlsx')[['pid', 'days_on_ventilator', 'ventilator_off']]
+    d2 = pd.read_excel('/Users/kliron/Data/covid19/Radiology2020/radiology_old.xlsx')[['pid', 'unr', 'scan_date']]
+    d3 = d1.merge(d2, how='inner', on='pid')
     df = stats.merge(data, how='left', on='uid')
-    df = df[['uid', 'optic_sheath', 'mars', 'iva',
+    df['unr'] = df['uid'].str.split(r'[0-9]{1,2}_').str[-1]
+    df = df.merge(d3, how='left', on='unr')
+    df['days_from_extubation_to_scan'] = df['scan_date'] - df['ventilator_off']
+    df = df[['pid', 'uid', 'optic_sheath', 'mars', 'iva', 'days_on_ventilator', 'days_from_extubation_to_scan',
              'CBF_norm', 'CBV_norm', 'MTT_norm', 'K1_norm', 'K2_norm',
              'CBF', 'CBV', 'MTT', 'K1', 'K2',
              'CBF_std', 'MTT_std', 'K1_std', 'K2_std',

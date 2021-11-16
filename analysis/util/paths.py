@@ -2,8 +2,8 @@
 import os
 
 DATA_ROOT = 'H:/Dokument' if os.name == 'nt' else '/Users/kliron'
-DICOM_ROOT = os.path.join(DATA_ROOT, 'Data/dsc_covid19/Examinations')
-ANALYSIS_ROOT = os.path.join(DATA_ROOT, 'Data/dsc_covid19/Analysis')
+DICOM_ROOT = os.path.join(DATA_ROOT, 'Data/covid19/plexus_perfusion/Examinations')
+ANALYSIS_ROOT = os.path.join(DATA_ROOT, 'Data/covid19/plexus_perfusion/Analysis')
 SEGMENTATION_FILENAME = 'Plexus.nrrd'
 # BET (brain extraction tool) does not support 4D images. We need to convert each 4D series to a list of 3D images,
 # save it to a temporary nifti file, call BET to process it, and convert the output back to nrrd which is the format the
@@ -25,7 +25,7 @@ DSC_EXECUTABLE = '/Applications/Slicer.app/Contents/Extensions-30329/DSCMRIAnaly
 PLEXUS_STATS_FILE = os.path.join(ANALYSIS_ROOT, 'plexus_stats.xlsx')
 PERFUSION_DATA_FILE = os.path.join(ANALYSIS_ROOT, 'perfusion_data.xlsx')
 ADDITIONAL_DATA_FILE = os.path.join(ANALYSIS_ROOT, 'data.xlsx')
-ISP_ROOT = '/Users/kliron/Data/dsc_covid19/ISP'
+ISP_ROOT = '/Users/kliron/Data/covid19/plexus_perfusion/ISP'
 
 paths = {
     '0_SEKBF00012197064': {
@@ -49,13 +49,14 @@ paths = {
         'noncontrast_frames': [0, 1, 2],
         'contrast_frames': [10, 11, 12]
     },
-    '3_SEKBF00012202695': {
-        'dicom_dir': '0000732E/AA82036F/AA293FC2/0000854C',
-        'isp_dicom_root': '0000D276/AA4A2F2E/AABB770E',
-        'isp_dicom_dirs': ['0000A2D3', '0000AB98', '00002ED9', '0000856A', '00009337'],
-        'noncontrast_frames': [0, 1, 2],
-        'contrast_frames': [6, 7, 8]
-    },
+    # Severe motion artifacts
+    # '3_SEKBF00012202695': {
+    #     'dicom_dir': '0000732E/AA82036F/AA293FC2/0000854C',
+    #     'isp_dicom_root': '0000D276/AA4A2F2E/AABB770E',
+    #     'isp_dicom_dirs': ['0000A2D3', '0000AB98', '00002ED9', '0000856A', '00009337'],
+    #     'noncontrast_frames': [0, 1, 2],
+    #     'contrast_frames': [6, 7, 8]
+    # },
     '4_SEKBF00012204240': {
         'dicom_dir': '00009BC9/AA2D8A4A/AAB031AE/0000C8EB',
         'isp_dicom_root': '00009F05/AA9AB432/AAC193B9',
@@ -71,13 +72,13 @@ paths = {
         'contrast_frames': [8, 9, 10]
     },
     # Large ICH
-    '6_SEKBF00012208882': {
-        'dicom_dir': '0000CD6C/AA40BA99/AAC0EC4F/0000FC82',
-        'isp_dicom_root': '0000CDD6/AAE3FAAC/AAFEFFF2',
-        'isp_dicom_dirs': ['0000D65D', '0000FFE6', '0000421E', '00002510', '00006498'],
-        'noncontrast_frames': [0, 1, 2],
-        'contrast_frames': [4, 5, 6]
-    },
+    # '6_SEKBF00012208882': {
+    #     'dicom_dir': '0000CD6C/AA40BA99/AAC0EC4F/0000FC82',
+    #     'isp_dicom_root': '0000CDD6/AAE3FAAC/AAFEFFF2',
+    #     'isp_dicom_dirs': ['0000D65D', '0000FFE6', '0000421E', '00002510', '00006498'],
+    #     'noncontrast_frames': [0, 1, 2],
+    #     'contrast_frames': [4, 5, 6]
+    # },
     '7_SEKBF00012212884': {
         'dicom_dir': '0000E9BE/AA112ECA/AAC9E5B4/00005935',
         'isp_dicom_root': '0000422F/AA2065DB/AAD8E667',
