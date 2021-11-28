@@ -5,7 +5,7 @@ import sys
 import argparse
 import numpy as np
 import pandas as pd
-from statsmodels.stats.weightstats import ttest_ind
+from typing import List
 import shutil
 import re
 
@@ -21,7 +21,7 @@ else:
     # In order for CLion to be able to import local python modules you have to mark the directory containing them as
     # "sources". There is a bug in Clion where the context menu is missing "mark directory as". To workaround create an
     # empty CMakeLists.txt file, reload the project and the option will appear.
-    from .util.paths import paths
+    from .util.paths import *
     from .util.util import *
 
 os.environ['SITK_SHOW_COMMAND'] = 'H:/Slicer 4.11.20210226/Slicer.exe' if os.name == 'nt' else '/Applications/Slicer.app/Contents/MacOS/Slicer'
@@ -35,7 +35,6 @@ def edit_segmentation(uid: str,
                       show: bool = False) -> [sitk.Image]:
     """
     We remove voxels that contain calcifications or don't take up gadolinium from the plexus segmentation.
-
     Segmentations are saved as labelmaps where each voxel belonging to the segmentation has the value 1 (default)
     and the rest the value 0. Thus, by using orig_img_arr[segm == 1] we can index into the original image and get the
     voxels corresponding to the volume of the segmentation.
@@ -65,8 +64,7 @@ def edit_segmentation(uid: str,
     # Remove voxels where the absolute value of the intensity difference between noncontrast minus contrast average
     # intensity is lower than one standard deviation of the
     # average noncontrast intensity.
-    remove_condition = np.abs((noncontrast_avg_array[segm_arr == 1] - contrast_avg_array[segm_arr == 1])) < np.std(
-        noncontrast_avg_array[segm_arr == 1])
+    remove_condition = np.abs((noncontrast_avg_array[segm_arr == 1] - contrast_avg_array[segm_arr == 1])) < np.std(noncontrast_avg_array[segm_arr == 1])
 
     # Setting the voxel to 0 (the default label for background) removes it from the segmentation
     for idx, cond in zip(mask_indexes, remove_condition):
@@ -196,15 +194,17 @@ def run_perfusion(uid: str, show=False) -> None:
         sitk.Show(img, title=f'{uid}, CBF map')
 
 
-def get_statistics(use_isp_maps=True, write: bool = True) -> pd.DataFrame:
+def get_statistics(use_isp_maps=True, uids: List[str] = None) -> pd.DataFrame:
     """
     Extract statistics from the perfusion maps.
     :param use_isp_maps: If true (default) will use the Philips ISP perfusion maps for all measurements
-    :param write: If True, will write an excel file of the results at PLEXUS_STATS_FILE
+    :param uids: get statistics only for these UIDs
     :return: Returns the Pandas dataframe of results
     """
     stats = pd.DataFrame()
     for uid in paths.keys():
+        if uids and uid not in uids:
+            continue
         print(f'Reading perfusion maps for {uid}')
         img_root = os.path.join(ANALYSIS_ROOT, uid) if use_isp_maps else os.path.join(ANALYSIS_ROOT, uid, DERIVED_DIR)
         # By default GetArrayFromImage returns float32 values which may cause precision errors. We convert to float64.
@@ -230,9 +230,12 @@ def get_statistics(use_isp_maps=True, write: bool = True) -> pd.DataFrame:
             ustats[f'{k}_max'] = np.max(v)
             # Normalized by the whole brain mean
             ustats[f'{k}_norm'] = ustats[f'{k}']/brain_mean
-
         stats = stats.append(ustats, ignore_index=True)
+        
+    return stats
 
+
+def merge_and_save_excel(stats: pd.DataFrame) -> None:
     # Read optic sheath and mars data
     data = pd.read_excel(ADDITIONAL_DATA_FILE)
     d1 = pd.read_excel('/Users/kliron/Data/covid19/Radiology2020/clinical.xlsx')[['pid', 'days_on_ventilator', 'ventilator_off']]
@@ -249,32 +252,8 @@ def get_statistics(use_isp_maps=True, write: bool = True) -> pd.DataFrame:
              'CBF_max', 'MTT_max', 'K1_max', 'K2_max',
              'CBF_min', 'MTT_min', 'K1_min', 'K2_min',
              'n_voxels_plexus', 'n_voxels_brain']]
-    if write:
-        df.to_excel(PLEXUS_STATS_FILE, index=False)
 
-    high_icp_cbf = df.loc[df['optic_sheath'] == 1, 'CBF_norm']
-    norm_icp_cbf = df.loc[df['optic_sheath'] == 0, 'CBF_norm']
-    high_icp_cbv = df.loc[df['optic_sheath'] == 1, 'CBV_norm']
-    norm_icp_cbv = df.loc[df['optic_sheath'] == 0, 'CBV_norm']
-    high_icp_mtt = df.loc[df['optic_sheath'] == 1, 'MTT_norm']
-    norm_icp_mtt = df.loc[df['optic_sheath'] == 0, 'MTT_norm']
-    high_icp_k1 = df.loc[df['optic_sheath'] == 1, 'K1_norm']
-    norm_icp_k1 = df.loc[df['optic_sheath'] == 0, 'K1_norm']
-    high_icp_k2 = df.loc[df['optic_sheath'] == 1, 'K2_norm']
-    norm_icp_k2 = df.loc[df['optic_sheath'] == 0, 'K2_norm']
-    t1, p1, d1 = ttest_ind(high_icp_cbf, norm_icp_cbf)
-    t2, p2, d2 = ttest_ind(high_icp_cbv, norm_icp_cbv)
-    t3, p3, d3 = ttest_ind(high_icp_mtt, norm_icp_mtt)
-    t4, p4, d4 = ttest_ind(high_icp_k1, norm_icp_k1)
-    t5, p5, d5 = ttest_ind(high_icp_k2, norm_icp_k2)
-
-    print(f'Independent Two-sample T-test for CBF, p = {p1}')
-    print(f'Independent Two-sample T-test for CBV, p = {p2}')
-    print(f'Independent Two-sample T-test for MTT, p = {p3}')
-    print(f'Independent Two-sample T-test for K1, p = {p4}')
-    print(f'Independent Two-sample T-test for K2, p = {p5}')
-
-    return df
+    df.to_excel(PLEXUS_STATS_FILE, index=False)
 
 
 def clean_derived_files():
@@ -291,12 +270,18 @@ def save_nrrd_from_isp_dicom() -> None:
     """Reads the DICOM files from Philips ISP perfusion results. Asks user for name of sequence to save."""
     imply_yes = False
     for uid, vals in paths.items():
-        dcm_root = os.path.join(ISP_ROOT, uid, 'DICOM', vals['isp_dicom_root'])
-        dcm_dirs = vals['isp_dicom_dirs']
+        dcm_root = os.path.join(DICOM_ROOT, uid, 'DICOM', '/'.join(vals['dicom_dir'].split('/')[:-1]))
+        dcm_dirs = vals.get('isp_dicom_dirs', None)
+        dcm_dirs = os.listdir(dcm_root) if dcm_dirs is None else dcm_dirs
         for dcm_dir in dcm_dirs:
             dcm_path = os.path.join(dcm_root, dcm_dir)
             print(f'Trying to read 3D series at {dcm_path}')
-            img, tags = read_3d_series(dcm_path)
+            try:
+                img, tags = read_3d_series(dcm_path)
+            except RuntimeError as e:
+                print(f'Error trying to read 3D DICOM series: {e}')
+                continue
+
             # ISP saves the type of image under 'Image Type' tag
             img_type = tags['Image Type']
             m = re.match(r'.*?(MTT|CBF|CBV|K1|K2).*', img_type)
@@ -321,8 +306,7 @@ def save_nrrd_from_isp_dicom() -> None:
 
 
 def main():
-    parser = argparse.ArgumentParser(description='DSC perfusion analysis.',
-                                     usage=f'{sys.argv[0]} [--uids UID1 UID2 ...] --preprocess | --perfusion\n')
+    parser = argparse.ArgumentParser(description='DSC perfusion analysis.', usage=f'{sys.argv[0]} [--uids UID1 UID2 ...] --preprocess | --perfusion\n')
     parser.add_argument('-u', '--uids', help='Specify UIDs to process', nargs='*')
     parser.add_argument('-e', '--edit_segmentations', action='store_true', help='Remove voxels with calcifications and voxels that do not take up contrast from plexus segmentations')
     parser.add_argument('-b', '--extract_brain', action='store_true', help='Call BET tool to extract brain from perfusion series')
@@ -368,4 +352,26 @@ def main():
 if __name__ == '__main__':
     main()
 
+# from statsmodels.stats.weightstats import ttest_ind
 
+# high_icp_cbf = df.loc[df['optic_sheath'] == 1, 'CBF_norm']
+# norm_icp_cbf = df.loc[df['optic_sheath'] == 0, 'CBF_norm']
+# high_icp_cbv = df.loc[df['optic_sheath'] == 1, 'CBV_norm']
+# norm_icp_cbv = df.loc[df['optic_sheath'] == 0, 'CBV_norm']
+# high_icp_mtt = df.loc[df['optic_sheath'] == 1, 'MTT_norm']
+# norm_icp_mtt = df.loc[df['optic_sheath'] == 0, 'MTT_norm']
+# high_icp_k1 = df.loc[df['optic_sheath'] == 1, 'K1_norm']
+# norm_icp_k1 = df.loc[df['optic_sheath'] == 0, 'K1_norm']
+# high_icp_k2 = df.loc[df['optic_sheath'] == 1, 'K2_norm']
+# norm_icp_k2 = df.loc[df['optic_sheath'] == 0, 'K2_norm']
+# t1, p1, d1 = ttest_ind(high_icp_cbf, norm_icp_cbf)
+# t2, p2, d2 = ttest_ind(high_icp_cbv, norm_icp_cbv)
+# t3, p3, d3 = ttest_ind(high_icp_mtt, norm_icp_mtt)
+# t4, p4, d4 = ttest_ind(high_icp_k1, norm_icp_k1)
+# t5, p5, d5 = ttest_ind(high_icp_k2, norm_icp_k2)
+#
+# print(f'Independent Two-sample T-test for CBF, p = {p1}')
+# print(f'Independent Two-sample T-test for CBV, p = {p2}')
+# print(f'Independent Two-sample T-test for MTT, p = {p3}')
+# print(f'Independent Two-sample T-test for K1, p = {p4}')
+# print(f'Independent Two-sample T-test for K2, p = {p5}')

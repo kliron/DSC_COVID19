@@ -6,7 +6,7 @@ from subprocess import Popen, PIPE
 from typing import Dict
 
 
-DICOM_TAGS_JSON = 'H:/Dokument/Projects/dsc_covid19/dicom_tags.json' if os.name == 'nt' else '../dicom_tags.json'
+DICOM_TAGS_JSON = 'H:/Dokument/Projects/dsc_covid19/dicom_tags.json' if os.name == 'nt' else '/Users/kliron/Projects/dsc_covid19/dicom_tags.json'
 TEMPORAL_POSITION_IDENTIFIER_TAG = '0020|0100'
 ACQUISITION_NUMBER_TAG = '0020|0012'
 
