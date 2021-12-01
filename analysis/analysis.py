@@ -252,7 +252,6 @@ def merge_and_save_excel(stats: pd.DataFrame) -> None:
              'CBF_norm', 'CBV_norm', 'MTT_norm', 'K1_norm', 'K2_norm', 'CBF', 'CBV', 'MTT', 'K1', 'K2',
              'CBF_std', 'CBV_std', 'MTT_std', 'K1_std', 'K2_std', 'CBF_max', 'CBV_max', 'MTT_max', 'K1_max', 'K2_max',
              'CBF_min', 'CBV_min', 'MTT_min', 'K1_min', 'K2_min', 'n_voxels_plexus', 'n_voxels_brain']]
-
     df.to_excel(PLEXUS_STATS_FILE, index=False)
 
 
@@ -307,116 +306,36 @@ def save_nrrd_from_isp_dicom() -> None:
 
 def run_stats() -> None:
     df = pd.read_excel('/Users/kliron/Data/covid19/plexus_perfusion/Analysis/final_analysis.xlsx')
+    print(f'Cases # = {len(df.loc[df["case"] == 1,])} ({len(df.loc[(df["case"] == 1) & (df["sex"] == "F"),])} female)')
+    print(f'Controls # = {len(df.loc[df["case"] == 0,])} ({len(df.loc[(df["case"] == 0) & (df["sex"] == "F"),])} female)')
+    print(f'Case age mean: {df.loc[df["case"] == 1, "age"].mean():.1f}, median: {df.loc[df["case"] == 1, "age"].median():.1f}, '
+          f'standard deviation: {df.loc[df["case"] == 1, "age"].std():.1f}')
+    print(f'Control age mean: {df.loc[df["case"] == 0, "age"].mean():.1f}, median: {df.loc[df["case"] == 0, "age"].median():.1f}, '
+          f'standard deviation: {df.loc[df["case"] == 0, "age"].std():.1f}')
 
-    high_icp = (df['case'] == 1) & (df['optic_sheath'] == 1)
-    high_icp_cbf = df.loc[high_icp, 'CBF_norm']
-    high_icp_cbv = df.loc[high_icp, 'CBV_norm']
-    high_icp_mtt = df.loc[high_icp, 'MTT_norm']
-    high_icp_k1 = df.loc[high_icp, 'K1_norm']
-    high_icp_k2 = df.loc[high_icp, 'K2_norm']
+    selectors = {
+        'high_icp': (df['case'] == 1) & (df['optic_sheath'] == 1),
+        'norm_icp': (df['case'] == 1) & (df['optic_sheath'] == 0),
+        'ctrl': df['case'] == 0,
+        'ctrl_old': (df['case'] == 0) & (df['age'] > 40),
+        'ctrl_young': (df['case'] == 0) & (df['age'] < 40)
+    }
+    comparison_pairs = [('high_icp', 'norm_icp'),
+                        ('high_icp', 'ctrl'), ('norm_icp', 'ctrl'),
+                        ('high_icp', 'ctrl_young'), ('norm_icp', 'ctrl_young'),
+                        ('high_icp', 'ctrl_old'), ('norm_icp', 'ctrl_old'),
+                        ('ctrl_young', 'ctrl_old')]
+    comparison_vars = ['CBF_norm', 'CBV_norm', 'MTT_norm', 'K1_norm', 'K2_norm']
 
-    norm_icp = (df['case'] == 1) & (df['optic_sheath'] == 0)
-    norm_icp_cbf = df.loc[norm_icp, 'CBF_norm']
-    norm_icp_cbv = df.loc[norm_icp, 'CBV_norm']
-    norm_icp_mtt = df.loc[norm_icp, 'MTT_norm']
-    norm_icp_k1 = df.loc[norm_icp, 'K1_norm']
-    norm_icp_k2 = df.loc[norm_icp, 'K2_norm']
-
-    ctrl = df['case'] == 0
-    ctrl_cbf = df.loc[ctrl, 'CBF_norm']
-    ctrl_cbv = df.loc[ctrl, 'CBV_norm']
-    ctrl_mtt = df.loc[ctrl, 'MTT_norm']
-    ctrl_k1 = df.loc[ctrl, 'K1_norm']
-    ctrl_k2 = df.loc[ctrl, 'K2_norm']
-
-    ctrl_old = (df['case'] == 0) & (df['age'] > 40)
-    ctrl_old_cbf = df.loc[ctrl_old, 'CBF_norm']
-    ctrl_old_cbv = df.loc[ctrl_old, 'CBV_norm']
-    ctrl_old_mtt = df.loc[ctrl_old, 'MTT_norm']
-    ctrl_old_k1 = df.loc[ctrl_old, 'K1_norm']
-    ctrl_old_k2 = df.loc[ctrl_old, 'K2_norm']
-
-    ctrl_young = (df['case'] == 0) & (df['age'] < 40)
-    ctrl_young_cbf = df.loc[ctrl_young, 'CBF_norm']
-    ctrl_young_cbv = df.loc[ctrl_young, 'CBV_norm']
-    ctrl_young_mtt = df.loc[ctrl_young, 'MTT_norm']
-    ctrl_young_k1 = df.loc[ctrl_young, 'K1_norm']
-    ctrl_young_k2 = df.loc[ctrl_young, 'K2_norm']
-
-    t1, p1, d1 = ttest_ind(high_icp_cbf, norm_icp_cbf)
-    t2, p2, d2 = ttest_ind(high_icp_cbv, norm_icp_cbv)
-    t3, p3, d3 = ttest_ind(high_icp_mtt, norm_icp_mtt)
-    t4, p4, d4 = ttest_ind(high_icp_k1, norm_icp_k1)
-    t5, p5, d5 = ttest_ind(high_icp_k2, norm_icp_k2)
-
-    def star(p):
-        return "**" if p < 0.01 else "*" if p < 0.05 else ""
-
-    print(f'CBF high ICP vs normal ICP, p = {p1} {star(p1)}')
-    print(f'CBV high ICP vs normal ICP, p = {p2} {star(p2)}')
-    print(f'MTT high ICP vs normal ICP, p = {p3} {star(p3)}')
-    print(f'K1 high ICP vs normal ICP, p = {p4} {star(p4)}')
-    print(f'K2 high ICP vs normal ICP, p = {p5} {star(p5)}')
-
-    t6, p6, d6 = ttest_ind(high_icp_cbf, ctrl_cbf)
-    t7, p7, d7 = ttest_ind(high_icp_cbv, ctrl_cbv)
-    t8, p8, d8 = ttest_ind(high_icp_mtt, ctrl_mtt)
-    t9, p9, d9 = ttest_ind(high_icp_k1, ctrl_k1)
-    t10, p10, d10 = ttest_ind(high_icp_k2, ctrl_k2)
-
-    print(f'CBF high ICP vs ctrl, p = {p6} {star(p6)}')
-    print(f'CBV high ICP vs ctrl, p = {p7} {star(p7)}')
-    print(f'MTT high ICP vs ctrl, p = {p8} {star(p8)}')
-    print(f'K1 high ICP vs ctrl, p = {p9} {star(p9)}')
-    print(f'K2 high ICP vs ctrl, p = {p10} {star(p10)}')
-
-    t11, p11, d11 = ttest_ind(norm_icp_cbf, ctrl_cbf)
-    t12, p12, d12 = ttest_ind(norm_icp_cbv, ctrl_cbv)
-    t13, p13, d13 = ttest_ind(norm_icp_mtt, ctrl_mtt)
-    t14, p14, d14 = ttest_ind(norm_icp_k1, ctrl_k1)
-    t15, p15, d15 = ttest_ind(norm_icp_k2, ctrl_k2)
-
-    print(f'CBF norm ICP vs ctrl, p = {p11} {star(p11)}')
-    print(f'CBV norm ICP vs ctrl, p = {p12} {star(p12)}')
-    print(f'MTT norm ICP vs ctrl, p = {p13} {star(p13)}')
-    print(f'K1 norm ICP vs ctrl, p = {p14} {star(p14)}')
-    print(f'K2 norm ICP vs ctrl, p = {p15} {star(p15)}')
-
-    t26, p26, d26 = ttest_ind(high_icp_cbf, ctrl_old_cbf)
-    t27, p27, d27 = ttest_ind(high_icp_cbv, ctrl_old_cbv)
-    t28, p28, d28 = ttest_ind(high_icp_mtt, ctrl_old_mtt)
-    t29, p29, d29 = ttest_ind(high_icp_k1, ctrl_old_k1)
-    t30, p30, d30 = ttest_ind(high_icp_k2, ctrl_old_k2)
-
-    print(f'CBF high ICP vs old ctrl, p = {p26} {star(p26)}')
-    print(f'CBV high ICP vs old ctrl, p = {p27} {star(p27)}')
-    print(f'MTT high ICP vs old ctrl, p = {p28} {star(p28)}')
-    print(f'K1 high ICP vs old ctrl, p = {p29} {star(p29)}')
-    print(f'K2 high ICP vs old ctrl, p = {p30} {star(p30)}')
-
-    t16, p16, d16 = ttest_ind(norm_icp_cbf, ctrl_old_cbf)
-    t17, p17, d17 = ttest_ind(norm_icp_cbv, ctrl_old_cbv)
-    t18, p18, d18 = ttest_ind(norm_icp_mtt, ctrl_old_mtt)
-    t19, p19, d19 = ttest_ind(norm_icp_k1, ctrl_old_k1)
-    t20, p20, d20 = ttest_ind(norm_icp_k2, ctrl_old_k2)
-
-    print(f'CBF norm ICP vs old ctrl, p = {p16} {star(p16)}')
-    print(f'CBV norm ICP vs old ctrl, p = {p17} {star(p17)}')
-    print(f'MTT norm ICP vs old ctrl, p = {p18} {star(p18)}')
-    print(f'K1 norm ICP vs old ctrl, p = {p19} {star(p19)}')
-    print(f'K2 norm ICP vs old ctrl, p = {p20} {star(p20)}')
-
-    t21, p21, d21 = ttest_ind(ctrl_young_cbf, ctrl_old_cbf)
-    t22, p22, d22 = ttest_ind(ctrl_young_cbv, ctrl_old_cbv)
-    t23, p23, d23 = ttest_ind(ctrl_young_mtt, ctrl_old_mtt)
-    t24, p24, d24 = ttest_ind(ctrl_young_k1, ctrl_old_k1)
-    t25, p25, d25 = ttest_ind(ctrl_young_k2, ctrl_old_k2)
-
-    print(f'CBF young ctrl vs old ctrl, p = {p21} {star(p21)}')
-    print(f'CBV young ctrl vs old ctrl, p = {p22} {star(p22)}')
-    print(f'MTT young ctrl vs old ctrl, p = {p23} {star(p23)}')
-    print(f'K1 young ctrl vs old ctrl, p = {p24} {star(p24)}')
-    print(f'K2 young ctrl vs old ctrl, p = {p25} {star(p25)}')
+    for left, right in comparison_pairs:
+        sel_left = selectors[left]
+        sel_right = selectors[right]
+        print('')
+        for var in comparison_vars:
+            rows_left = df.loc[sel_left, var]
+            rows_right = df.loc[sel_right, var]
+            t, p, d = ttest_ind(rows_left, rows_right)
+            print(f'{var.replace("_norm", "")} {left.replace("_", " ")} vs {right.replace("_", " ")}, p = {p:.3f} {"**" if p < 0.01 else "*" if p < 0.05 else ""}')
 
 
 def main():
