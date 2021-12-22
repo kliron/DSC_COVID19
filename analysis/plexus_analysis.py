@@ -18,10 +18,6 @@ if __name__ == '__main__' or parent_module.__name__ == '__main__':
     from util.paths import *
     from util.util import *
 else:
-    # Create an empty CMakeLists.txt file and reload it.
-    # In order for CLion to be able to import local python modules you have to mark the directory containing them as
-    # "sources". There is a bug in Clion where the context menu is missing "mark directory as". To workaround create an
-    # empty CMakeLists.txt file, reload the project and the option will appear.
     from .util.paths import *
     from .util.util import *
 
@@ -48,9 +44,9 @@ def edit_segmentation(uid: str,
     print(f'Editing segmentation for {uid}')
     analysis_root = os.path.join(ANALYSIS_ROOT, uid)
     params = paths[uid]
-    dcm_path = os.path.join(DICOM_ROOT, uid, 'DICOM', params['dicom_dir'])
+    dcm_path = os.path.join(DATA_ROOT, uid, 'DICOM', params['perf_dicom_dir'])
     series, dicom_tags = read_4d_series(dcm_path)
-    segm = sitk.ReadImage(os.path.join(analysis_root, SEGMENTATION_FILENAME))
+    segm = sitk.ReadImage(os.path.join(DATA_ROOT, uid, 'segmentations', PLEXUS_SEGMENTATION_FILENAME))
 
     # Get the average voxel values for the non-contrast series
     noncontrast_imgs = [series[frame] for frame in params['noncontrast_frames']]
@@ -76,10 +72,10 @@ def edit_segmentation(uid: str,
     final_segm = sitk.GetImageFromArray(segm_arr)
     final_segm.CopyInformation(segm)
     show_overlay(noncontrast_imgs[0], final_segm) if show else ()
-    derived_dir = os.path.join(analysis_root, DERIVED_DIR)
+    derived_dir = os.path.join(DATA_ROOT, uid, DERIVED_DIR)
     if not os.path.exists(derived_dir):
         os.mkdir(derived_dir)
-    sitk.WriteImage(final_segm, os.path.join(derived_dir, f'final_{SEGMENTATION_FILENAME}'))
+    sitk.WriteImage(final_segm, os.path.join(derived_dir, f'final_{PLEXUS_SEGMENTATION_FILENAME}'))
     return series
 
 
@@ -93,7 +89,7 @@ def extract_brain(uid: str) -> None:
     :return: Paths to the final .nrrd file that was created
     """
     params = paths[uid]
-    dcm_path = os.path.join(DICOM_ROOT, uid, 'DICOM', params['dicom_dir'])
+    dcm_path = os.path.join(DATA_ROOT, uid, 'DICOM', params['perf_dicom_dir'])
     series, dicom_tags = read_4d_series(dcm_path)
     nii_path = os.path.join(ANALYSIS_ROOT, uid, DERIVED_DIR, NII_DIR)
     if not os.path.exists(nii_path):
@@ -156,6 +152,7 @@ def correct_and_copy_dicom_tags_to_final_multivolume(uid: str) -> None:
     sitk.WriteImage(ext, os.path.join(ANALYSIS_ROOT, uid, DERIVED_DIR, FINAL_PERFUSION_MULTIVOLUME))
 
 
+# Deprecated - we use ISP perfusion maps instead
 def run_perfusion(uid: str, show=False) -> None:
     """
     Uses DSCMRIAnalysis Slicer CLI module (https://www.slicer.org/w/index.php/Documentation/Nightly/Modules/DSC_MRI_Analysis)
@@ -269,7 +266,7 @@ def save_nrrd_from_isp_dicom() -> None:
     """Reads the DICOM files from Philips ISP perfusion results. Asks user for name of sequence to save."""
     imply_yes = False
     for uid, vals in paths.items():
-        dcm_root = os.path.join(DICOM_ROOT, uid, 'DICOM', '/'.join(vals['dicom_dir'].split('/')[:-1]))
+        dcm_root = os.path.join(DATA_ROOT, uid, 'DICOM')
         dcm_dirs = vals.get('isp_dicom_dirs', None)
         dcm_dirs = os.listdir(dcm_root) if dcm_dirs is None else dcm_dirs
         for dcm_dir in dcm_dirs:
@@ -291,7 +288,7 @@ def save_nrrd_from_isp_dicom() -> None:
                 continue
             else:
                 ptype = m.group(1)
-                out_path = os.path.join(DATA_ROOT, ANALYSIS_ROOT, uid, f'{ptype}.nrrd')
+                out_path = os.path.join(DATA_ROOT, uid, f'{ptype}.nrrd')
                 print(f'Found the type {ptype}. Will save at {out_path}')
                 if not imply_yes:
                     choice = input('Is this correct [y/n/A]?')
@@ -305,7 +302,7 @@ def save_nrrd_from_isp_dicom() -> None:
 
 
 def run_stats() -> None:
-    df = pd.read_excel('/Users/kliron/Data/covid19/plexus_perfusion/Analysis/final_analysis.xlsx')
+    df = pd.read_excel('/Users/kliron/Data/covid19/perfusion/analysis/final_analysis.xlsx')
     print(f'Cases # = {len(df.loc[df["case"] == 1,])} ({len(df.loc[(df["case"] == 1) & (df["sex"] == "F"),])} female)')
     print(f'Controls # = {len(df.loc[df["case"] == 0,])} ({len(df.loc[(df["case"] == 0) & (df["sex"] == "F"),])} female)')
     print(f'Case age mean: {df.loc[df["case"] == 1, "age"].mean():.1f}, median: {df.loc[df["case"] == 1, "age"].median():.1f}, '
@@ -339,16 +336,16 @@ def run_stats() -> None:
 
 
 def main():
-    parser = argparse.ArgumentParser(description='DSC perfusion analysis.', usage=f'{sys.argv[0]} [--uids UID1 UID2 ...] --preprocess | --perfusion\n')
+    parser = argparse.ArgumentParser(description='DSC perfusion analysis.', usage=f'{sys.argv[0]} [--uids UID1 UID2 ...] --edit_segmentations | --perfusion | --copytags | --isp | --analysis | --stats | --clean \n')
     parser.add_argument('-u', '--uids', help='Specify UIDs to process', nargs='*')
     parser.add_argument('-e', '--edit_segmentations', action='store_true', help='Remove voxels with calcifications and voxels that do not take up contrast from plexus segmentations')
     parser.add_argument('-b', '--extract_brain', action='store_true', help='Call BET tool to extract brain from perfusion series')
     parser.add_argument('-c', '--copytags', action='store_true', help='Copy DICOM tags from original to skull-stripped 4D image')
     parser.add_argument('-r', '--perfusion', action='store_true', help='Run perfusion analysis')
-    parser.add_argument('-x', '--clean', action='store_true', help='Clean all derived data')
     parser.add_argument('-i', '--isp', action='store_true', help='Save DICOM ISP perfusion maps as .nrrd')
     parser.add_argument('-a', '--analysis', action='store_true', help='Get plexus measurements')
     parser.add_argument('-s', '--stats', action='store_true', help='Run statistics tests')
+    parser.add_argument('-x', '--clean', action='store_true', help='Clean all derived data')
     args = parser.parse_args()
 
     if len(sys.argv) < 2:
